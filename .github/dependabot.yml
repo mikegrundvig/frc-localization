@@ -1,0 +1,14 @@
+# Weekly pull requests for newer build tools, test libraries, and CI actions. WPILib's libraries
+# come with the robot model, and Gradle itself is updated deliberately, not by this bot.
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "gradle-wrapper"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

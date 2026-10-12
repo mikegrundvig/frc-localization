@@ -1,0 +1,104 @@
+// Localization: where the robot is, from its wheels, IMUs, and cameras, on the field the world
+// model describes, and the math of the calibration procedures. It reads the world model and WPILib's
+// math, and nothing of a robot program, a simulator, or Pitwall: the robot runs it every loop
+// without them, and its tests run in milliseconds without them.
+
+plugins {
+    id "java-library"
+    id "java-test-fixtures"
+    id "jacoco"
+    alias(libs.plugins.spotless)
+    alias(libs.plugins.errorprone)
+    alias(libs.plugins.pitest)
+}
+
+// What a build that includes this one asks for (settings.gradle, includeBuild): the library is
+// com.michaelgrundvig.frc:frc-localization.
+group = "com.michaelgrundvig.frc"
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+// WPILib publishes its libraries to its own repository; everything else is on Maven Central.
+repositories {
+    maven {
+        name = "wpilib"
+        url = "https://frcmaven.wpi.edu/artifactory/release/"
+        content {
+            includeGroupByRegex "org\\.wpilib(\\..*)?"
+        }
+    }
+    mavenCentral()
+}
+
+dependencies {
+    // The field and the robot's definition appear in its signatures, and with them WPILib's math,
+    // at the version the model is written in.
+    api "com.michaelgrundvig.frc:frc-robot-model"
+
+    // Configuration records are built by name, through builders generated as they compile.
+    compileOnly libs.recordbuilder.core
+    testCompileOnly libs.recordbuilder.core
+    testFixturesCompileOnly libs.recordbuilder.core
+    annotationProcessor libs.recordbuilder.processor
+    // Writes the configuration records' Javadoc into the jar, so Pitwall's page can say what each
+    // value means. It runs in the compiler only: localization never sees Pitwall.
+    annotationProcessor "com.michaelgrundvig.frc:docs-processor"
+
+    errorprone libs.errorprone.core
+    errorprone libs.nullaway
+
+    // What a team checks a localizer of its own with: the contract's conformance suite
+    // (LocalizerConformance) and its bench. JUnit's API and AssertJ appear in them.
+    testFixturesApi platform(libs.junit.bom)
+    testFixturesApi "org.junit.jupiter:junit-jupiter-api"
+    testFixturesApi libs.assertj.core
+
+    testImplementation platform(libs.junit.bom)
+    testImplementation "org.junit.jupiter:junit-jupiter"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+    testImplementation libs.assertj.core
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // As the robot program compiles: localization runs on the robot, every loop.
+    options.compilerArgs.add "-XDstringConcat=inline"
+}
+tasks.named("compileJava") {
+    options.compilerArgs.add "-Apitwall.docs.records=com.michaelgrundvig.frc.world.config.ConfigRecord"
+}
+
+tasks.named("test") {
+    useJUnitPlatform()
+}
+
+apply from: file("gradle/quality.gradle")
+
+// Mutation testing: PIT changes localization's compiled code a little at a time (a comparison
+// turned round, a returned value emptied, a call removed) and runs the tests that cover each
+// change. A change no test notices is a line the tests run without checking. Coverage says which
+// lines ran; this says which are checked. It takes minutes, so nothing runs it but its own task,
+// `pitest`: not `check`, not `ci`. Its report is build/reports/pitest/index.html.
+pitest {
+    pitestVersion = libs.versions.pitest.core.get()
+    junit5PluginVersion = libs.versions.pitest.junit5.get()
+    // All of localization, or the classes -PpitClasses names, for a shorter run while working on
+    // one: ./gradlew pitest -PpitClasses='com.michaelgrundvig.frc.localization.SlipCheck*'
+    targetClasses = [
+        project.findProperty("pitClasses") ?: "com.michaelgrundvig.frc.localization.*"
+    ]
+    targetTests = [
+        "com.michaelgrundvig.frc.localization.*"
+    ]
+    // The builders are generated as the records compile: nothing of localization's to test.
+    excludedClasses = [
+        "com.michaelgrundvig.frc.localization.**.*Builder*"
+    ]
+    // Two test JVMs at once, as the tests themselves run (gradle/quality.gradle).
+    threads = 2
+    outputFormats = ["HTML", "XML"]
+    timestampedReports = false
+}
