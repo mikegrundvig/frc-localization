@@ -35,6 +35,16 @@ package com.michaelgrundvig.frc.localization;
  * measurements beside another camera's say otherwise. A robot with one camera has nothing to judge
  * it against, and it is never doubted here.
  *
+ * <p><b>A camera's clock.</b> A camera whose images are stamped a little late misses another way:
+ * by how far the robot moved and turned in that time. An image stamped late by a time t is set
+ * against where the robot was t after it was taken, so it misses by the robot's velocity times t,
+ * backward; and it was solved with the heading of t later, which swings it about its tags by the
+ * turn rate times t. Both grow with how the robot moves, and are nothing at rest. So beside the
+ * average, the watch fits how a camera's misses follow the robot's motion: the time that,
+ * multiplied by how far a second of lateness would put each image off (its late arm), best explains
+ * them. That time is the camera's lateness ({@link #lateSeconds}), and what it explains is taken
+ * off the camera's measurements with the rest.
+ *
  * <p>A place is a camera's number among the errors the filter keeps apart ({@link
  * ConsideredErrors}). The sums are kept in one array for each kind, by place, so that noting a
  * measurement makes no object.
@@ -70,6 +80,13 @@ final class CameraWatch {
    */
   private static final double LEAST_VARIANCE = 1e-8;
 
+  /**
+   * How unsure a camera's lateness is before its misses have said anything of it, as a variance: 50
+   * ms squared, a frame or two, which is what a coprocessor whose time sync failed is off by. It
+   * only keeps a fit made from very little motion from saying much.
+   */
+  private static final double LATE_VARIANCE_BEFORE = 0.05 * 0.05;
+
   /** What each older measurement keeps of its weight when a new one comes: 1 - 1/memory. */
   private final double kept;
 
@@ -80,6 +97,12 @@ final class CameraWatch {
   private final double allowedTurnVariance;
 
   private final double allowedShiftVariance;
+
+  /**
+   * How late or early a camera's stamps may be while its time sync works, as a variance, in seconds
+   * squared: the lateness's allowance.
+   */
+  private final double allowedLateVariance;
 
   // For each camera, by place: its newest miss, and sums over how far apart its misses were, each
   // weighted by how recent it is. Everything is in the robot's frame, forward and left, in meters.
@@ -105,6 +128,28 @@ final class CameraWatch {
   /** How far the measurement's tags were from the robot, in meters. */
   private final double[] distanceSum = new double[ConsideredErrors.MAX_CAMERAS];
 
+  // The late arms of its measurements: how far a second of lateness would have put each one off,
+  // forward and left, in meters a second.
+  private final double[] lateArmForwardSum = new double[ConsideredErrors.MAX_CAMERAS];
+  private final double[] lateArmLeftSum = new double[ConsideredErrors.MAX_CAMERAS];
+
+  /** The late arms' squared lengths. */
+  private final double[] lateArmSquaredSum = new double[ConsideredErrors.MAX_CAMERAS];
+
+  /** Each late arm's dot product with how far apart its miss was. */
+  private final double[] lateArmDotApartSum = new double[ConsideredErrors.MAX_CAMERAS];
+
+  /**
+   * The lateness each camera's own misses fit, in seconds, and its variance, as last judged: before
+   * the middle of all the cameras' is taken off it.
+   */
+  private final double[] fittedLate = new double[ConsideredErrors.MAX_CAMERAS];
+
+  private final double[] fittedLateVariance = new double[ConsideredErrors.MAX_CAMERAS];
+
+  /** How late each camera's images are taken to be stamped, in seconds, as last judged. */
+  private final double[] late = new double[ConsideredErrors.MAX_CAMERAS];
+
   /**
    * How far each camera is taken to put its measurements off, as last judged: along the robot's
    * forward and along its left, in meters. Its length is the camera's doubt.
@@ -127,8 +172,14 @@ final class CameraWatch {
    * @param allowedTurnStdDevRadians how far a calibrated camera may be turned on its mount, which
    *     the filter already allows for: the watch looks only for more than that could be
    * @param allowedShiftStdDevMeters and how far it may be shifted
+   * @param allowedLateStdDevSeconds how late or early a camera's stamps may be while its time sync
+   *     works: the watch looks only for more than that could be
    */
-  CameraWatch(int memory, double allowedTurnStdDevRadians, double allowedShiftStdDevMeters) {
+  CameraWatch(
+      int memory,
+      double allowedTurnStdDevRadians,
+      double allowedShiftStdDevMeters,
+      double allowedLateStdDevSeconds) {
     if (memory < 2 * FEWEST_TO_JUDGE) {
       throw new IllegalArgumentException(
           "judge a camera by at least " + (int) (2 * FEWEST_TO_JUDGE) + " measurements: " + memory);
@@ -136,6 +187,7 @@ final class CameraWatch {
     kept = 1 - 1.0 / memory;
     allowedTurnVariance = allowedTurnStdDevRadians * allowedTurnStdDevRadians;
     allowedShiftVariance = allowedShiftStdDevMeters * allowedShiftStdDevMeters;
+    allowedLateVariance = allowedLateStdDevSeconds * allowedLateStdDevSeconds;
     java.util.Arrays.fill(heardNanos, Long.MIN_VALUE / 2);
   }
 
@@ -154,6 +206,9 @@ final class CameraWatch {
    * @param claimedVariance how unsure the measurement claims its position is, as a variance along
    *     each axis, in square meters
    * @param odometryVariance how unsure odometry's place is, the same way
+   * @param lateArmX how far a second of lateness in its stamp would have put it off along the
+   *     field's x, in meters a second ({@link #lateArmX})
+   * @param lateArmY and along y
    */
   void accepted(
       int camera,
@@ -163,7 +218,9 @@ final class CameraWatch {
       double headingRadians,
       double tagDistanceMeters,
       double claimedVariance,
-      double odometryVariance) {
+      double odometryVariance,
+      double lateArmX,
+      double lateArmY) {
     if (!ConsideredErrors.hasPlace(camera)) {
       return;
     }
@@ -192,6 +249,16 @@ final class CameraWatch {
     apartSquaredSum[camera] =
         kept * apartSquaredSum[camera] + apartForward * apartForward + apartLeft * apartLeft;
     distanceSum[camera] = kept * distanceSum[camera] + tagDistanceMeters;
+    double lateArmForward = cos * lateArmX + sin * lateArmY;
+    double lateArmLeft = -sin * lateArmX + cos * lateArmY;
+    lateArmForwardSum[camera] = kept * lateArmForwardSum[camera] + lateArmForward;
+    lateArmLeftSum[camera] = kept * lateArmLeftSum[camera] + lateArmLeft;
+    lateArmSquaredSum[camera] =
+        kept * lateArmSquaredSum[camera]
+            + lateArmForward * lateArmForward
+            + lateArmLeft * lateArmLeft;
+    lateArmDotApartSum[camera] =
+        kept * lateArmDotApartSum[camera] + lateArmForward * apartForward + lateArmLeft * apartLeft;
     judge(camera);
   }
 
@@ -258,22 +325,69 @@ final class CameraWatch {
   }
 
   /**
-   * Judges a camera by its average: how far its measurements are off, which is the average of how
-   * far apart its misses were, as far as that stands clear of what a sound camera could show.
+   * How far a second of lateness in an image's stamp puts its measurement off along the field's x,
+   * in meters a second: its late arm's x. {@link #lateArmY} gives its y.
+   *
+   * <p>An image stamped t late is set against where the robot was t after it was taken, so it
+   * misses by the velocity times t, backward. And it was solved with the heading the robot had t
+   * later, which is the turn rate times t further round: a position solved with a heading that much
+   * too far lands that angle times its lever, a quarter turn back from it. With the lever (lx, ly),
+   * the velocity (vx, vy) and the turn rate w, a second of lateness puts it off by
+   *
+   * <pre>(w ly - vx, -w lx - vy)</pre>
+   *
+   * @param leverY from the robot to the measurement's tags along the field's y, in meters
+   * @param velocityX the robot's velocity along the field's x when the image was taken
+   * @param yawRate how fast the robot was turning then, counterclockwise, in radians a second
+   */
+  static double lateArmX(double leverY, double velocityX, double yawRate) {
+    return yawRate * leverY - velocityX;
+  }
+
+  /** The late arm's y: see {@link #lateArmX}. */
+  static double lateArmY(double leverX, double velocityY, double yawRate) {
+    return -yawRate * leverX - velocityY;
+  }
+
+  /**
+   * Judges a camera by how far apart its misses have been: how late its images are stamped, and how
+   * far its measurements are off the same way every time.
+   *
+   * <p>The fit of {@code apart = off + late × late arm} is the line through the weighted means
+   * whose slope is the late arms' covariance with the misses over the late arms' own spread:
    *
    * <pre>
-   * average   = the weighted mean of how far apart its misses were
-   * noise²    = their variance about that mean, along each axis / how many
-   * allowed²  = its shift's allowance² + (its turn's allowance × its tags' distance)²
-   * off       = average × sqrt(1 - 3² (noise² + allowed²) / |average|²), or nothing where that is
-   *             negative
+   * spread = mean(|arm|²) - |mean(arm)|²
+   * late   = (mean(arm · apart) - mean(arm) · mean(apart)) / spread
+   * off    = mean(apart) - late × mean(arm)
    * </pre>
+   *
+   * <p>What that fit leaves of the misses is their noise, over both axes together, so half of it is
+   * each axis's. The misses tell of the lateness with an information of the summed spread over one
+   * measurement's noise, and what was known before any miss adds its own, one over its variance. So
+   * the lateness fitted is the line's, weighted by the misses' share of the information, and its
+   * variance is one over the two informations together. A robot that barely moves leaves it near
+   * zero and as unsure as before.
+   *
+   * <p><b>Its lateness</b> is the lateness its misses fit, less the middle of all the cameras'
+   * ({@link #judgeLateness}).
+   *
+   * <p><b>Its off</b> is kept only as far as it stands clear of what a sound camera could show:
+   * times {@code sqrt(1 - 3² variance / its own square)}, or nothing where that is negative. The
+   * variance is, along each axis,
+   *
+   * <pre>
+   * noise²    = one measurement's noise / how many
+   * allowed²  = its shift's allowance² + (its turn's allowance × its tags' distance)²
+   * </pre>
+   *
+   * <p>and, for the part of the off that lies along the mean late arm, the fitted lateness's
+   * variance times the mean arm's square besides: a lateness not yet known could be what puts a
+   * robot that drives steadily one way off along its travel, and could not put it off to one side.
    *
    * <p>The noise is judged by the camera's own scatter, not by the uncertainty each image claimed:
    * an image's claim is a cautious one, several times its real scatter at a distance, and judged by
-   * it a knocked camera would go unnoticed for many seconds. Their variance about the mean is the
-   * mean of their squares less the square of the mean, over both axes together, so half of it is
-   * each axis's.
+   * it a knocked camera would go unnoticed for many seconds.
    *
    * <p>The allowance is what the filter already takes a calibrated camera's mount to be off by. A
    * camera within three of its standard deviations is left to the filter. So is a small error of
@@ -288,18 +402,122 @@ final class CameraWatch {
     }
     double meanForward = apartForwardSum[camera] / n;
     double meanLeft = apartLeftSum[camera] / n;
-    double meanSquared = meanForward * meanForward + meanLeft * meanLeft;
-    double scatterBothAxes = Math.max(0, apartSquaredSum[camera] / n - meanSquared);
-    double varianceOfMeanEachAxis = scatterBothAxes / 2 / n;
+    double armForward = lateArmForwardSum[camera] / n;
+    double armLeft = lateArmLeftSum[camera] / n;
+    double meanArmSquared = armForward * armForward + armLeft * armLeft;
+    double spread = Math.max(0, lateArmSquaredSum[camera] / n - meanArmSquared);
+    double armWithApart =
+        lateArmDotApartSum[camera] / n - armForward * meanForward - armLeft * meanLeft;
+    double lineLate = spread > 0 ? armWithApart / spread : 0;
+    double leftOverBothAxes =
+        apartSquaredSum[camera] / n
+            - meanForward * meanForward
+            - meanLeft * meanLeft
+            - lineLate * lineLate * spread;
+    double noiseEachAxis = Math.max(0, leftOverBothAxes) / 2;
+
+    double informationBefore = 1 / LATE_VARIANCE_BEFORE;
+    double informationFromMisses = informationOfLateness(n * spread, noiseEachAxis);
+    double lateSeconds = 0;
+    if (informationFromMisses > 0) {
+      // Written as one over one plus the ratio, so that misses with no noise at all, whose
+      // information is infinite, keep the whole of the line's lateness.
+      lateSeconds = lineLate / (1 + informationBefore / informationFromMisses);
+    }
+    double lateVariance = 1 / (informationBefore + informationFromMisses);
+    fittedLate[camera] = lateSeconds;
+    fittedLateVariance[camera] = lateVariance;
+    judgeLateness();
+
+    double forward = meanForward - lateSeconds * armForward;
+    double left = meanLeft - lateSeconds * armLeft;
     double tagDistance = distanceSum[camera] / n;
     double allowedSquared = allowedShiftVariance + allowedTurnVariance * tagDistance * tagDistance;
-    double soundSquared =
-        CLEAR_OF_NOISE * CLEAR_OF_NOISE * (varianceOfMeanEachAxis + allowedSquared);
-    // Written so an average that is not a number counts as no doubt.
-    boolean clearOfASoundCamera = meanSquared > soundSquared;
-    double share = clearOfASoundCamera ? Math.sqrt(1 - soundSquared / meanSquared) : 0;
-    offForward[camera] = share * meanForward;
-    offLeft[camera] = share * meanLeft;
+    double soundVariance = noiseEachAxis / n + allowedSquared;
+    // What is unsure of the lateness makes the off unsure only along the mean late arm, the way
+    // a lateness moves a measurement. So the off is kept in two parts: the part along the mean
+    // arm, which has that doubt as well, and the part across it, which does not.
+    double armLength = Math.sqrt(meanArmSquared);
+    double alongForward = armLength > 0 ? armForward / armLength : 1;
+    double alongLeft = armLength > 0 ? armLeft / armLength : 0;
+    double along = forward * alongForward + left * alongLeft;
+    double acrossForward = forward - along * alongForward;
+    double acrossLeft = left - along * alongLeft;
+    double alongKept =
+        along * shareClearOf(along * along, soundVariance + lateVariance * meanArmSquared);
+    double acrossShare =
+        shareClearOf(acrossForward * acrossForward + acrossLeft * acrossLeft, soundVariance);
+    offForward[camera] = alongKept * alongForward + acrossShare * acrossForward;
+    offLeft[camera] = alongKept * alongLeft + acrossShare * acrossLeft;
+  }
+
+  /**
+   * Sets every judged camera's lateness: the lateness its own misses fit, less the middle of all
+   * the judged cameras', as far as that stands clear of noise and of what a camera's stamps may be
+   * off by while its time sync works.
+   *
+   * <p>The misses are taken from odometry's place, and what the wheels and the gyro get wrong by a
+   * share of the robot's motion, a worn tread or a gyro's scale, puts that place off just as a
+   * lateness would put a camera's. That shows as the same lateness in every camera, so the middle
+   * of them, their median, is odometry's doing and is taken off. With one camera judged there is
+   * nothing to tell its lateness from odometry's error, and it has none. With two that differ, each
+   * is half the difference from their middle: nothing says which of them is late.
+   */
+  private void judgeLateness() {
+    int count = 0;
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      if (weight[camera] >= FEWEST_TO_JUDGE) {
+        // Each goes in after the larger ones before it, which keeps them in order.
+        int at = count++;
+        while (at > 0 && inOrder[at - 1] > fittedLate[camera]) {
+          inOrder[at] = inOrder[at - 1];
+          at--;
+        }
+        inOrder[at] = fittedLate[camera];
+      }
+    }
+    int middle = count / 2;
+    boolean oddCount = count % 2 == 1;
+    double middleLate = oddCount ? inOrder[middle] : (inOrder[middle - 1] + inOrder[middle]) / 2;
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      if (weight[camera] >= FEWEST_TO_JUDGE) {
+        double own = fittedLate[camera] - middleLate;
+        late[camera] =
+            own * shareClearOf(own * own, fittedLateVariance[camera] + allowedLateVariance);
+      }
+    }
+  }
+
+  /**
+   * How much the misses tell of a camera's lateness: the late arms' summed spread over one
+   * measurement's noise. None where the arms do not spread at all, and without limit where they do
+   * and there is no noise.
+   */
+  private static double informationOfLateness(double summedSpread, double noiseEachAxis) {
+    if (summedSpread <= 0) {
+      return 0;
+    }
+    return noiseEachAxis > 0 ? summedSpread / noiseEachAxis : Double.POSITIVE_INFINITY;
+  }
+
+  /**
+   * How much of a fitted value to keep, for its square and the variance of what a sound camera
+   * could show: all of it but what three standard deviations of that could be, as a share from 0 to
+   * 1.
+   */
+  private static double shareClearOf(double valueSquared, double variance) {
+    double soundSquared = CLEAR_OF_NOISE * CLEAR_OF_NOISE * variance;
+    // Written so a value that is not a number is not kept at all.
+    boolean clear = valueSquared > soundSquared;
+    return clear ? Math.sqrt(1 - soundSquared / valueSquared) : 0;
+  }
+
+  /**
+   * How late a camera's images are taken to be stamped, in seconds, as last judged: negative for
+   * images stamped early. Zero for a camera that has never been judged.
+   */
+  double lateSeconds(int camera) {
+    return ConsideredErrors.hasPlace(camera) ? late[camera] : 0;
   }
 
   /**
@@ -314,24 +532,32 @@ final class CameraWatch {
   }
 
   /**
-   * How far a camera is taken to put a measurement off along the field's x, in meters, with the
-   * robot facing a heading: what the estimator takes off its measurements before it weighs them.
+   * How far a camera is taken to put a measurement off along the field's x, in meters: what the
+   * estimator takes off its measurements before it weighs them. It is what the camera's mount puts
+   * every measurement off by, turned onto the field by the robot's heading, and what its lateness
+   * puts this one off by, which is the lateness times the measurement's late arm.
+   *
+   * @param headingRadians the robot's heading when the image was taken
+   * @param lateArmX how far a second of lateness would put this measurement off along the field's x
+   *     ({@link #lateArmX})
    */
-  double offX(int camera, double headingRadians) {
+  double offX(int camera, double headingRadians, double lateArmX) {
     if (!ConsideredErrors.hasPlace(camera)) {
       return 0;
     }
     return Math.cos(headingRadians) * offForward[camera]
-        - Math.sin(headingRadians) * offLeft[camera];
+        - Math.sin(headingRadians) * offLeft[camera]
+        + late[camera] * lateArmX;
   }
 
   /** And along y. */
-  double offY(int camera, double headingRadians) {
+  double offY(int camera, double headingRadians, double lateArmY) {
     if (!ConsideredErrors.hasPlace(camera)) {
       return 0;
     }
     return Math.sin(headingRadians) * offForward[camera]
-        + Math.cos(headingRadians) * offLeft[camera];
+        + Math.cos(headingRadians) * offLeft[camera]
+        + late[camera] * lateArmY;
   }
 
   /**

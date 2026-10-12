@@ -26,7 +26,7 @@ class CameraWatchTest {
   private static final class Watched {
     // A calibrated camera's mount is allowed 0.02° of turn, about 1 mm at these tags, and 1 mm of
     // shift: a camera is doubted for what is past three times those together, 4 mm.
-    final CameraWatch watch = new CameraWatch(50, Math.toRadians(0.02), 0.001);
+    final CameraWatch watch = new CameraWatch(50, Math.toRadians(0.02), 0.001, 0.001);
     final SplittableRandom random = new SplittableRandom(5);
 
     /** How unsure odometry's place is, as a variance: as sure as one camera, unless set. */
@@ -51,7 +51,8 @@ class CameraWatchTest {
           double left = misses[camera][1] + NOISE * random.nextGaussian();
           double x = Math.cos(heading) * forward - Math.sin(heading) * left;
           double y = Math.sin(heading) * forward + Math.cos(heading) * left;
-          watch.accepted(camera, nanos, x, y, heading, TAGS_AT_METERS, CLAIMED, odometryVariance);
+          watch.accepted(
+              camera, nanos, x, y, heading, TAGS_AT_METERS, CLAIMED, odometryVariance, 0, 0);
         }
       }
       return this;
@@ -212,7 +213,7 @@ class CameraWatchTest {
   /** A watch fed 100 images from each of two cameras, each claiming and missing as given. */
   private static CameraWatch watchingFarCameras(
       double[][] misses, double claimedVariance, double odometryVariance) {
-    CameraWatch watch = new CameraWatch(50, 0, 0);
+    CameraWatch watch = new CameraWatch(50, 0, 0, 0);
     SplittableRandom random = new SplittableRandom(13);
     long nanos = 1_000_000_000L;
     for (int image = 0; image < 100; image++) {
@@ -226,16 +227,98 @@ class CameraWatchTest {
             0,
             4,
             claimedVariance,
-            odometryVariance);
+            odometryVariance,
+            0,
+            0);
       }
     }
     return watch;
   }
 
+  /**
+   * A robot that drives a figure and turns as it goes, three cameras each seeing tags 3 m off its
+   * own way. One camera's images are stamped a time late, so each of them misses by that time times
+   * its late arm. The others' are stamped rightly.
+   *
+   * @param lateSeconds how late the first camera's images are stamped
+   * @param images how many images each camera takes
+   */
+  private static CameraWatch watchingARobotThatMoves(double lateSeconds, int images) {
+    CameraWatch watch = new CameraWatch(50, Math.toRadians(0.02), 0.001, 0.001);
+    SplittableRandom random = new SplittableRandom(9);
+    long nanos = 1_000_000_000L;
+    for (int image = 0; image < images; image++) {
+      nanos += IMAGE_NANOS;
+      double heading = 0.05 * image;
+      double velocityX = 2 * Math.cos(0.07 * image);
+      double velocityY = 2 * Math.sin(0.11 * image);
+      double yawRate = 1.5 * Math.sin(0.09 * image);
+      for (int camera = 0; camera < 3; camera++) {
+        double bearing = heading + 2.1 * camera;
+        double leverX = 3 * Math.cos(bearing);
+        double leverY = 3 * Math.sin(bearing);
+        double lateArmX = CameraWatch.lateArmX(leverY, velocityX, yawRate);
+        double lateArmY = CameraWatch.lateArmY(leverX, velocityY, yawRate);
+        double late = camera == 0 ? lateSeconds : 0;
+        watch.accepted(
+            camera,
+            nanos,
+            late * lateArmX + NOISE * random.nextGaussian(),
+            late * lateArmY + NOISE * random.nextGaussian(),
+            heading,
+            3,
+            CLAIMED,
+            CLAIMED,
+            lateArmX,
+            lateArmY);
+      }
+    }
+    return watch;
+  }
+
+  /**
+   * A camera whose images are stamped 20 ms late is found out by how its misses follow the robot's
+   * motion, within a few seconds of driving, and what its lateness puts a measurement off by is
+   * what is taken off it. Its mount is not doubted for it.
+   */
+  @Test
+  void aCameraStampedLateIsFoundOutByHowItsMissesFollowTheRobotsMotion() {
+    CameraWatch watch = watchingARobotThatMoves(0.020, 150);
+
+    assertThat(watch.lateSeconds(0)).isCloseTo(0.020, within(0.002));
+    assertThat(watch.lateSeconds(1)).as("stamped rightly").isCloseTo(0, within(0.001));
+    assertThat(watch.lateSeconds(2)).isCloseTo(0, within(0.001));
+    assertThat(watch.doubtMeters(0)).as("its mount").isLessThan(0.005);
+    // A measurement taken at 2 m/s along x, turning 1 rad/s, its tags 3 m along y: a second of
+    // lateness puts it 1 m off along x (the turn's 3, less the travel's 2) and nothing along y.
+    double lateArmX = CameraWatch.lateArmX(3, 2, 1);
+    double lateArmY = CameraWatch.lateArmY(0, 0, 1);
+    assertThat(lateArmX).isCloseTo(1.0, within(1e-12));
+    assertThat(lateArmY).isCloseTo(0.0, within(1e-12));
+    assertThat(watch.offX(0, 0.4, lateArmX)).isCloseTo(0.020, within(0.004));
+    assertThat(watch.offY(0, 0.4, lateArmY)).isCloseTo(0, within(0.004));
+    assertThat(watch.offX(1, 0.4, lateArmX))
+        .as("a camera stamped rightly")
+        .isCloseTo(0, within(0.002));
+    assertThat(watch.lateSeconds(ConsideredErrors.NO_PLACE)).isZero();
+  }
+
+  /** Stamped early, the lateness is negative; and a robot at rest says nothing of any clock. */
+  @Test
+  void latenessHasASignAndNeedsMotionToShow() {
+    assertThat(watchingARobotThatMoves(-0.030, 150).lateSeconds(0))
+        .isCloseTo(-0.030, within(0.003));
+
+    Watched atRest = new Watched().see(150, new double[] {0, 0.05}, NONE, NONE);
+    assertThat(atRest.watch.lateSeconds(0)).as("a mount's miss is not a clock's").isZero();
+    assertThat(atRest.watch.doubtMeters(0)).isCloseTo(0.05, within(0.005));
+  }
+
   @Test
   void aCameraWithoutAPlaceOrEnoughImagesIsNeverDoubted() {
     Watched watched = new Watched();
-    watched.watch.accepted(ConsideredErrors.NO_PLACE, watched.nanos, 1, 1, 0, 2, CLAIMED, CLAIMED);
+    watched.watch.accepted(
+        ConsideredErrors.NO_PLACE, watched.nanos, 1, 1, 0, 2, CLAIMED, CLAIMED, 0, 0);
     assertThat(watched.watch.doubtMeters(ConsideredErrors.NO_PLACE)).isZero();
     assertThat(watched.watch.distanceMeters(0)).as("no image yet").isNaN();
     assertThat(watched.watch.distanceMeters(ConsideredErrors.NO_PLACE)).isNaN();
@@ -251,6 +334,6 @@ class CameraWatchTest {
     assertThat(watched.watch.doubtMeters(0))
         .as("seen alone, it is judged against nothing, and keeps the doubt it had")
         .isCloseTo(0.5, within(0.01));
-    assertThatThrownBy(() -> new CameraWatch(19, 0, 0)).hasMessageContaining("at least 20");
+    assertThatThrownBy(() -> new CameraWatch(19, 0, 0, 0)).hasMessageContaining("at least 20");
   }
 }

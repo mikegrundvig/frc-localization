@@ -165,6 +165,16 @@ public final class PoseEstimator {
   /** How unsure that place is, as a variance along each axis: what the steps since have added. */
   private double odometryAloneVariance;
 
+  /**
+   * How the robot was moving at that moment, by odometry: its velocity over the field in meters a
+   * second, and how fast it was turning in radians a second. An image stamped a little late is off
+   * by these times the lateness ({@link CameraWatch#lateArmX}).
+   */
+  private double velocityXThen;
+
+  private double velocityYThen;
+  private double yawRateThen;
+
   // The books, for the estimate's mode and health.
 
   /** How far each recently accepted measurement was from the estimate. */
@@ -241,7 +251,8 @@ public final class PoseEstimator {
         new CameraWatch(
             config.cameraWatchMeasurements(),
             Math.toRadians(config.cameraTurnStdDevDegrees()),
-            config.cameraShiftStdDevMeters());
+            config.cameraShiftStdDevMeters(),
+            config.cameraClockStdDevSeconds());
     filter =
         new PoseFilter(
             new PoseFilter.Considered(
@@ -686,6 +697,9 @@ public final class PoseEstimator {
         odometryAloneX = history.xByOdometryAlone(step, fraction);
         odometryAloneY = history.yByOdometryAlone(step, fraction);
         odometryAloneVariance = history.varianceByOdometryAlone(step);
+        velocityXThen = history.velocityX(step);
+        velocityYThen = history.velocityY(step);
+        yawRateThen = history.yawRate(step);
         gateAndApply(replayed, history.yawPartWayThrough(step, fraction), decisions);
       }
       predictThrough(step, predictedUpTo, 1);
@@ -697,6 +711,9 @@ public final class PoseEstimator {
       odometryAloneX = filter.x();
       odometryAloneY = filter.y();
       odometryAloneVariance = 0;
+      velocityXThen = 0;
+      velocityYThen = 0;
+      yawRateThen = 0;
       gateAndApply(toApply.get(next++), history.yawAfter(history.newestStep()), decisions);
     }
     history.store(history.newestStep(), filter);
@@ -720,13 +737,18 @@ public final class PoseEstimator {
     boolean watched = !measurement.lever().equals(VisionMeasurement.Lever.NONE);
     double knownMissX = 0;
     double knownMissY = 0;
+    double lateArmX = 0;
+    double lateArmY = 0;
     if (watched && innovation != null) {
       // What the watch on the cameras takes this camera to put its measurements off by is taken
       // off, where that brings the measurement nearer the estimate. Where it does not, this is not
       // one of the images the camera's average miss is made of (a camera that misread a tag for a
       // while reads the next one rightly), and the measurement stands as it came.
-      double offX = watch.offX(camera, headingThen);
-      double offY = watch.offY(camera, headingThen);
+      Translation2d toTags = measurement.lever().robotToTags();
+      lateArmX = CameraWatch.lateArmX(toTags.getY(), velocityXThen, yawRateThen);
+      lateArmY = CameraWatch.lateArmY(toTags.getX(), velocityYThen, yawRateThen);
+      double offX = watch.offX(camera, headingThen, lateArmX);
+      double offY = watch.offY(camera, headingThen, lateArmY);
       double asItCame = Math.hypot(innovation.xMeters(), innovation.yMeters());
       double withItTakenOff = Math.hypot(innovation.xMeters() - offX, innovation.yMeters() - offY);
       if (withItTakenOff < asItCame) {
@@ -763,7 +785,9 @@ public final class PoseEstimator {
           headingThen,
           measurement.lever().robotToTags().getNorm(),
           (measurement.covariance().xx() + measurement.covariance().yy()) / 2,
-          odometryAloneVariance);
+          odometryAloneVariance,
+          lateArmX,
+          lateArmY);
     }
     filter.correct(innovation);
     applied.add(replayed.applied());
@@ -1023,6 +1047,16 @@ public final class PoseEstimator {
   /** How sure that is, as a standard deviation, in degrees a minute. */
   public double gyroDriftStdDevDegreesPerMinute() {
     return Math.toDegrees(filter.gyroDriftStdDev()) * SECONDS_PER_MINUTE;
+  }
+
+  /**
+   * How late the estimator's own watch takes a camera's images to be stamped, in seconds: negative
+   * for early. What that puts each of its measurements off by is taken off before they are weighed
+   * ({@link CameraWatch}). Zero for a camera it has not heard enough from, and for one with no
+   * other to be judged against.
+   */
+  public double cameraLateSeconds(String camera) {
+    return watch.lateSeconds(places.cameraPlace(camera));
   }
 
   /** The current pose: cheap, for driving every loop. */

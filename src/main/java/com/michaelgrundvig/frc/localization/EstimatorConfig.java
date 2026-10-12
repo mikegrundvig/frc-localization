@@ -71,11 +71,17 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     angle and is shared by every camera seeing it face-on: a stop-gap (docs/values.md).
  * @param cameraShiftStdDevDegrees and how far its headings may, beyond its turn: tags off the
  *     layout turn a multi-tag solve's heading by how far off they are over how far apart they sit
- * @param cameraWatchMeasurements how many of a camera's latest accepted measurements its mount is
- *     watched by: a camera whose measurements keep landing to one side of the other cameras', over
- *     about this many, counts for less by how far, and counts in full again once they stop. Enough
- *     that the noise of single images averages out (50 images' noise of 2 cm is 3 mm), and few
- *     enough that a knocked camera is found within a couple of seconds at 25 images a second.
+ * @param cameraWatchMeasurements how many of a camera's latest accepted measurements its mount and
+ *     its clock are watched by: a camera whose measurements keep landing to one side of the other
+ *     cameras', over about this many, has that taken off them and counts for less, and counts in
+ *     full again once they stop. Enough that the noise of single images averages out well below
+ *     what a calibrated mount is allowed (25 images' noise of 1 cm is 2 mm), and no more, so that a
+ *     knocked camera is found within a second at 25 images a second.
+ * @param cameraClockStdDevSeconds how late or early a camera's images may be stamped while its time
+ *     sync works: a few milliseconds, for the sync itself and for where in its exposure an image
+ *     counts as taken. The estimator finds a camera's lateness from how its measurements miss the
+ *     other cameras' as the robot moves and turns, and takes off what that lateness puts them off
+ *     by, where the lateness is past three times this.
  * @param tagPlacementStdDevMeters how far each tag may sit from where the field's layout says,
  *     along the field and across it (the field's tolerance, and how it was built): the same for
  *     every camera that sees it and every time it's seen, so the estimator keeps it apart for each
@@ -137,6 +143,7 @@ public record EstimatorConfig(
     double cameraShiftStdDevMeters,
     double cameraShiftStdDevDegrees,
     int cameraWatchMeasurements,
+    double cameraClockStdDevSeconds,
     double tagPlacementStdDevMeters,
     HeadingCorrection headingCorrection,
     double cameraShiftCorrelationMeters,
@@ -179,7 +186,8 @@ public record EstimatorConfig(
           .cameraTurnStdDevDegrees(0.25)
           .cameraShiftStdDevMeters(0.005)
           .cameraShiftStdDevDegrees(2.0)
-          .cameraWatchMeasurements(50)
+          .cameraWatchMeasurements(25)
+          .cameraClockStdDevSeconds(0.003)
           .tagPlacementStdDevMeters(0.01)
           .headingCorrection(HeadingCorrection.EVERY_FIX)
           .cameraShiftCorrelationMeters(1.0)
@@ -224,6 +232,7 @@ public record EstimatorConfig(
         .field("cameraShiftStdDevMeters", cameraShiftStdDevMeters, nonNegative())
         .field("cameraShiftStdDevDegrees", cameraShiftStdDevDegrees, nonNegative())
         .field("cameraWatchMeasurements", cameraWatchMeasurements, atLeast(20))
+        .field("cameraClockStdDevSeconds", cameraClockStdDevSeconds, positive())
         .field("tagPlacementStdDevMeters", tagPlacementStdDevMeters, nonNegative())
         .field("cameraShiftCorrelationMeters", cameraShiftCorrelationMeters, positive())
         .field("cameraShiftCorrelationDegrees", cameraShiftCorrelationDegrees, positive())

@@ -32,6 +32,12 @@ final class OdometryHistory {
   static final int OLDEST_STEP = 0;
 
   /**
+   * A rate at a step is taken over this many steps up to it: a loop's worth at 250 steps a second,
+   * so that one step's rounding does not show.
+   */
+  private static final int RATE_STEPS = 5;
+
+  /**
    * How the robot moved lately.
    *
    * @param fieldVelocity its velocity over the field, in meters a second
@@ -254,6 +260,38 @@ final class OdometryHistory {
   /** The same along y. */
   double yByOdometryAlone(int step, double fraction) {
     return filterYAfter[slotOf(OLDEST_STEP)] + carriedSince(carriedYAfter, step, fraction);
+  }
+
+  /**
+   * How fast odometry alone had the robot moving along the field's x as a step ended, in meters a
+   * second: its move over the few steps up to that one, over the time they took. Zero at the oldest
+   * step, which has no step before it to measure from.
+   */
+  double velocityX(int step) {
+    return ratePerSecond(carriedXAfter, step);
+  }
+
+  /** The same along y. */
+  double velocityY(int step) {
+    return ratePerSecond(carriedYAfter, step);
+  }
+
+  /** How fast the yaw was turning as a step ended, counterclockwise, in radians a second. */
+  double yawRate(int step) {
+    return ratePerSecond(yawAfterRadians, step);
+  }
+
+  /**
+   * How fast a value that is kept for each step was changing as a step ended, for each second: its
+   * change over the last {@link #RATE_STEPS} steps up to that one, or as many as are kept.
+   */
+  private double ratePerSecond(double[] valueAfter, int step) {
+    int from = Math.max(OLDEST_STEP, step - RATE_STEPS);
+    double seconds = Timestamps.toSeconds(endTime(step) - endTime(from));
+    if (seconds <= 0) {
+      return 0;
+    }
+    return (valueAfter[slotOf(step)] - valueAfter[slotOf(from)]) / seconds;
   }
 
   /**
