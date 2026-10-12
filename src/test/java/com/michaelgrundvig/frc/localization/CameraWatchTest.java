@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.SplittableRandom;
 import org.junit.jupiter.api.Test;
 
@@ -335,5 +338,311 @@ class CameraWatchTest {
         .as("seen alone, it is judged against nothing, and keeps the doubt it had")
         .isCloseTo(0.5, within(0.01));
     assertThatThrownBy(() -> new CameraWatch(19, 0, 0, 0)).hasMessageContaining("at least 20");
+  }
+
+  /**
+   * The watch's working written out plainly, from every measurement it was ever given: each sum is
+   * taken over the whole list, with each measurement's weight the share kept raised to its age. The
+   * watch keeps running sums instead, and must come to the same.
+   */
+  private static final class Plain {
+    static final int CAMERAS = 3;
+    static final double CLEAR_OF_NOISE = 3;
+    static final double FEWEST_TO_JUDGE = 10;
+    static final long SAME_MOMENT_NANOS = 100_000_000L;
+    static final double LEAST_VARIANCE = 1e-8;
+    static final double LATE_VARIANCE_BEFORE = 0.05 * 0.05;
+
+    /** What is kept of one measurement that had another camera to be judged against. */
+    record Kept(
+        double apartForward,
+        double apartLeft,
+        double distance,
+        double armForward,
+        double armLeft) {}
+
+    interface Of {
+      double of(Kept kept);
+    }
+
+    final double kept;
+    final double turnVariance;
+    final double shiftVariance;
+    final double lateVariance;
+    final List<List<Kept>> measurements = new ArrayList<>();
+    final long[] heard = new long[CAMERAS];
+    final double[] missForward = new double[CAMERAS];
+    final double[] missLeft = new double[CAMERAS];
+    final double[] missWeight = new double[CAMERAS];
+    final double[] fitted = new double[CAMERAS];
+    final double[] fittedVariance = new double[CAMERAS];
+    final double[] late = new double[CAMERAS];
+    final double[] offForward = new double[CAMERAS];
+    final double[] offLeft = new double[CAMERAS];
+
+    Plain(int memory, double turn, double shift, double lateStdDev) {
+      kept = 1 - 1.0 / memory;
+      turnVariance = turn * turn;
+      shiftVariance = shift * shift;
+      lateVariance = lateStdDev * lateStdDev;
+      Arrays.fill(heard, Long.MIN_VALUE / 2);
+      for (int camera = 0; camera < CAMERAS; camera++) {
+        measurements.add(new ArrayList<>());
+      }
+    }
+
+    /** The weighted sum of something over a camera's measurements, the newest counting whole. */
+    double sum(int camera, Of what) {
+      List<Kept> list = measurements.get(camera);
+      double sum = 0;
+      for (int i = 0; i < list.size(); i++) {
+        sum += Math.pow(kept, list.size() - 1 - i) * what.of(list.get(i));
+      }
+      return sum;
+    }
+
+    double weight(int camera) {
+      return sum(camera, each -> 1);
+    }
+
+    /** The weighted median of the voices of a moment along one axis, odometry's zero among them. */
+    double middle(double[] miss, long taken, double odometryWeight) {
+      List<double[]> voices = new ArrayList<>();
+      voices.add(new double[] {0, odometryWeight});
+      for (int camera = 0; camera < CAMERAS; camera++) {
+        if (Math.abs(taken - heard[camera]) <= SAME_MOMENT_NANOS) {
+          voices.add(new double[] {miss[camera], missWeight[camera]});
+        }
+      }
+      voices.sort((a, b) -> Double.compare(a[0], b[0]));
+      double half = voices.stream().mapToDouble(voice -> voice[1]).sum() / 2;
+      int lower = 0;
+      double below = voices.get(0)[1];
+      while (below < half) {
+        below += voices.get(++lower)[1];
+      }
+      int upper = voices.size() - 1;
+      double above = voices.get(upper)[1];
+      while (above < half) {
+        above += voices.get(--upper)[1];
+      }
+      return (voices.get(lower)[0] + voices.get(upper)[0]) / 2;
+    }
+
+    void accepted(
+        int camera,
+        long taken,
+        double missX,
+        double missY,
+        double heading,
+        double distance,
+        double claimed,
+        double odometryVariance,
+        double armX,
+        double armY) {
+      double cos = Math.cos(heading);
+      double sin = Math.sin(heading);
+      missForward[camera] = cos * missX + sin * missY;
+      missLeft[camera] = cos * missY - sin * missX;
+      missWeight[camera] = 1 / Math.max(claimed, LEAST_VARIANCE);
+      heard[camera] = taken;
+      long voices =
+          Arrays.stream(heard).filter(at -> Math.abs(taken - at) <= SAME_MOMENT_NANOS).count();
+      if (voices < 2) {
+        return;
+      }
+      double odometryWeight = 1 / Math.max(odometryVariance, LEAST_VARIANCE);
+      measurements
+          .get(camera)
+          .add(
+              new Kept(
+                  missForward[camera] - middle(missForward, taken, odometryWeight),
+                  missLeft[camera] - middle(missLeft, taken, odometryWeight),
+                  distance,
+                  cos * armX + sin * armY,
+                  cos * armY - sin * armX));
+      judge(camera);
+    }
+
+    void judge(int camera) {
+      double n = weight(camera);
+      if (n < FEWEST_TO_JUDGE) {
+        return;
+      }
+      double meanForward = sum(camera, Kept::apartForward) / n;
+      double meanLeft = sum(camera, Kept::apartLeft) / n;
+      double armForward = sum(camera, Kept::armForward) / n;
+      double armLeft = sum(camera, Kept::armLeft) / n;
+      double armSquared = armForward * armForward + armLeft * armLeft;
+      double spread =
+          Math.max(
+              0,
+              sum(camera, k -> k.armForward() * k.armForward() + k.armLeft() * k.armLeft()) / n
+                  - armSquared);
+      double armWithApart =
+          sum(camera, k -> k.armForward() * k.apartForward() + k.armLeft() * k.apartLeft()) / n
+              - armForward * meanForward
+              - armLeft * meanLeft;
+      double line = spread > 0 ? armWithApart / spread : 0;
+      double leftOver =
+          sum(camera, k -> k.apartForward() * k.apartForward() + k.apartLeft() * k.apartLeft()) / n
+              - meanForward * meanForward
+              - meanLeft * meanLeft
+              - line * line * spread;
+      double noise = Math.max(0, leftOver) / 2;
+      double before = 1 / LATE_VARIANCE_BEFORE;
+      double fromMisses = 0;
+      if (n * spread > 0) {
+        fromMisses = noise > 0 ? n * spread / noise : Double.POSITIVE_INFINITY;
+      }
+      fitted[camera] = fromMisses > 0 ? line / (1 + before / fromMisses) : 0;
+      fittedVariance[camera] = 1 / (before + fromMisses);
+      judgeLateness();
+
+      double forward = meanForward - fitted[camera] * armForward;
+      double left = meanLeft - fitted[camera] * armLeft;
+      double distance = sum(camera, Kept::distance) / n;
+      double sound = noise / n + shiftVariance + turnVariance * distance * distance;
+      double armLength = Math.sqrt(armSquared);
+      double alongForward = armLength > 0 ? armForward / armLength : 1;
+      double alongLeft = armLength > 0 ? armLeft / armLength : 0;
+      double along = forward * alongForward + left * alongLeft;
+      double acrossForward = forward - along * alongForward;
+      double acrossLeft = left - along * alongLeft;
+      double alongKept =
+          along * clearOf(along * along, sound + fittedVariance[camera] * armSquared);
+      double acrossShare = clearOf(acrossForward * acrossForward + acrossLeft * acrossLeft, sound);
+      offForward[camera] = alongKept * alongForward + acrossShare * acrossForward;
+      offLeft[camera] = alongKept * alongLeft + acrossShare * acrossLeft;
+    }
+
+    void judgeLateness() {
+      List<Double> judged = new ArrayList<>();
+      for (int camera = 0; camera < CAMERAS; camera++) {
+        if (weight(camera) >= FEWEST_TO_JUDGE) {
+          judged.add(fitted[camera]);
+        }
+      }
+      judged.sort(Double::compare);
+      int size = judged.size();
+      double middle =
+          size % 2 == 1
+              ? judged.get(size / 2)
+              : (judged.get(size / 2 - 1) + judged.get(size / 2)) / 2;
+      for (int camera = 0; camera < CAMERAS; camera++) {
+        if (weight(camera) >= FEWEST_TO_JUDGE) {
+          double own = fitted[camera] - middle;
+          late[camera] = own * clearOf(own * own, fittedVariance[camera] + lateVariance);
+        }
+      }
+    }
+
+    static double clearOf(double squared, double variance) {
+      double sound = CLEAR_OF_NOISE * CLEAR_OF_NOISE * variance;
+      return squared > sound ? Math.sqrt(1 - sound / squared) : 0;
+    }
+  }
+
+  /**
+   * Three cameras over two minutes of a robot that drives and turns: one knocked 6 cm to its left a
+   * third of the way in, one stamped 30 ms late, each missing an image now and then, the wheels
+   * sure and unsure by turns. After every measurement the watch says of every camera exactly what
+   * its working written out plainly says: how far it is off, how late, how doubted, how far its
+   * tags.
+   */
+  @Test
+  void theWatchSaysWhatItsWorkingWrittenOutPlainlySays() {
+    double turn = Math.toRadians(0.25);
+    CameraWatch watch = new CameraWatch(25, turn, 0.003, 0.003);
+    Plain plain = new Plain(25, turn, 0.003, 0.003);
+    SplittableRandom random = new SplittableRandom(11);
+    long nanos = 1_000_000_000L;
+    double heading = 0;
+    double mostDoubt = 0;
+    double mostLate = 0;
+    int compared = 0;
+
+    for (int moment = 0; moment < 900; moment++) {
+      // Now and then every camera is blind for a while, and the next images are of a new moment.
+      nanos += random.nextInt(20) == 0 ? 400_000_000L : IMAGE_NANOS;
+      heading += 0.2 * random.nextGaussian();
+      double velocityX = 3 * random.nextGaussian();
+      double velocityY = 3 * random.nextGaussian();
+      double odometryVariance = Math.pow(10, -6 + 4 * random.nextDouble());
+      for (int camera = 0; camera < Plain.CAMERAS; camera++) {
+        if (random.nextInt(6) == 0) {
+          continue;
+        }
+        double armX = -velocityX + random.nextGaussian();
+        double armY = -velocityY + random.nextGaussian();
+        double lateBy = camera == 2 ? 0.030 : 0;
+        double knockedLeft = camera == 1 && moment > 300 ? 0.06 : 0;
+        double missX =
+            -Math.sin(heading) * knockedLeft + lateBy * armX + NOISE * random.nextGaussian();
+        double missY =
+            Math.cos(heading) * knockedLeft + lateBy * armY + NOISE * random.nextGaussian();
+        double distance = 1.5 + 2.5 * random.nextDouble();
+        double claimed = 1e-4 + 9e-4 * random.nextDouble();
+        long taken = nanos + camera * 1_000_000L;
+        watch.accepted(
+            camera, taken, missX, missY, heading, distance, claimed, odometryVariance, armX, armY);
+        plain.accepted(
+            camera, taken, missX, missY, heading, distance, claimed, odometryVariance, armX, armY);
+
+        for (int each = 0; each < Plain.CAMERAS; each++) {
+          double cos = Math.cos(heading);
+          double sin = Math.sin(heading);
+          double offX = cos * plain.offForward[each] - sin * plain.offLeft[each];
+          double offY = sin * plain.offForward[each] + cos * plain.offLeft[each];
+          assertThat(watch.offX(each, heading, armX))
+              .as("moment %d, camera %d: off along x", moment, each)
+              .isCloseTo(offX + plain.late[each] * armX, within(1e-9));
+          assertThat(watch.offY(each, heading, armY))
+              .as("moment %d, camera %d: off along y", moment, each)
+              .isCloseTo(offY + plain.late[each] * armY, within(1e-9));
+          assertThat(watch.lateSeconds(each)).isCloseTo(plain.late[each], within(1e-10));
+          assertThat(watch.doubtMeters(each))
+              .isCloseTo(Math.hypot(plain.offForward[each], plain.offLeft[each]), within(1e-9));
+          double weight = plain.weight(each);
+          if (weight > 0) {
+            assertThat(watch.distanceMeters(each))
+                .isCloseTo(plain.sum(each, Plain.Kept::distance) / weight, within(1e-9));
+          }
+          compared++;
+        }
+        mostDoubt = Math.max(mostDoubt, watch.doubtMeters(1));
+        mostLate = Math.max(mostLate, Math.abs(watch.lateSeconds(2)));
+      }
+    }
+
+    assertThat(compared).isGreaterThan(6000);
+    assertThat(mostDoubt).as("the knocked camera was doubted").isGreaterThan(0.04);
+    assertThat(mostLate).as("the late camera was found late").isGreaterThan(0.01);
+  }
+
+  /** A second of lateness puts a measurement off by (w ly - vx, -w lx - vy). */
+  @Test
+  void theLateArmIsTheVelocityBackwardAndTheLeverAQuarterTurnBack() {
+    assertThat(CameraWatch.lateArmX(2.0, 0.5, 3.0)).isEqualTo(5.5);
+    assertThat(CameraWatch.lateArmY(2.0, 0.5, 3.0)).isEqualTo(-6.5);
+  }
+
+  /**
+   * Cameras are of the same moment when their images were taken within a tenth of a second, and a
+   * camera never heard from is of no moment at all, however early the clock.
+   */
+  @Test
+  void camerasAreOfTheSameMomentWithinATenthOfASecond() {
+    CameraWatch early = new CameraWatch(20, 0, 0, 0.001);
+    early.accepted(0, 50_000_000L, 0.1, 0, 0, 2, CLAIMED, CLAIMED, 0, 0);
+    assertThat(early.distanceMeters(0)).as("alone, it is judged against nothing").isNaN();
+
+    CameraWatch within = new CameraWatch(20, 0, 0, 0.001);
+    within.accepted(0, 1_000_000_000L, 0.1, 0, 0, 2, CLAIMED, CLAIMED, 0, 0);
+    within.accepted(1, 1_100_000_000L, 0.1, 0, 0, 3, CLAIMED, CLAIMED, 0, 0);
+    assertThat(within.distanceMeters(1)).as("a tenth of a second on").isEqualTo(3);
+    within.accepted(2, 1_200_000_001L, 0.1, 0, 0, 3, CLAIMED, CLAIMED, 0, 0);
+    assertThat(within.distanceMeters(2)).as("just past a tenth after the last").isNaN();
+    assertThat(within.offY(ConsideredErrors.NO_PLACE, 0, 1)).isZero();
   }
 }

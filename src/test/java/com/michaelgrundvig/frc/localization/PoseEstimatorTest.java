@@ -1367,6 +1367,29 @@ class PoseEstimatorTest {
   }
 
   /**
+   * A gyro reading 3% high, as the estimator reports it once the cameras have found it: 3%, to a
+   * few hundredths, and how sure it is of that, which is far surer than the 1% it started with.
+   */
+  @Test
+  void theGyrosScaleIsReportedInPercentOfItsReading() {
+    Robot robot = new Robot();
+    assertThat(robot.estimator.gyroScaleStdDevPercent())
+        .as("at first")
+        .isCloseTo(1.0, within(0.01));
+    double real = robot.pose().getRotation().getRadians();
+    for (int quarter = 0; quarter < 16; quarter++) {
+      robot.spin(125, Math.PI, 1.03);
+      real += Math.PI / 2;
+      for (int image = 0; image < 5; image++) {
+        robot.seeHeading(real);
+      }
+    }
+
+    assertThat(robot.estimator.gyroScalePercent()).isCloseTo(3.0, within(0.05));
+    assertThat(robot.estimator.gyroScaleStdDevPercent()).isBetween(0.001, 0.2);
+  }
+
+  /**
    * Stands still for a while, the wheels reporting no motion, while the gyro's yaw turns at a rate
    * of its own: its drift, or the robot being carried.
    */

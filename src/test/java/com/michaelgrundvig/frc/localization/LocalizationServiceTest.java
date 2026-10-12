@@ -840,6 +840,28 @@ class LocalizationServiceTest {
     }
   }
 
+  /**
+   * A robot that really spins is turning: by its IMU's own rate, and by its wheels' with no IMU.
+   * That is the turning its images are judged for blur by.
+   */
+  @Test
+  void aRobotThatSpinsIsTurningByItsImuAndByItsWheelsWithoutOne() {
+    LocalizationService localization = placed();
+    ScriptedDrivetrain robot = scripted();
+
+    drive(localization, robot, 100, new ChassisVelocities(0, 0, 8.0), false);
+    assertThat(localization.capture(robot.now()).recentYawRateRadiansPerSecond())
+        .as("by the IMU")
+        .isCloseTo(8.0, within(0.01));
+
+    robot.gyroLost = true;
+    robot.backupLost = true;
+    drive(localization, robot, 100, new ChassisVelocities(0, 0, 3.0), false);
+    assertThat(localization.capture(robot.now()).recentYawRateRadiansPerSecond())
+        .as("by the wheels")
+        .isCloseTo(3.0, within(0.2));
+  }
+
   private static double headingError(LocalizationService localization, ScriptedDrivetrain robot) {
     return Math.abs(
         localization.pose().getRotation().minus(robot.truth().getRotation()).getDegrees());

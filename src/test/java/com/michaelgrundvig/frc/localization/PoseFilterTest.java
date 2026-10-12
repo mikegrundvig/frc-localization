@@ -586,4 +586,65 @@ class PoseFilterTest {
     assertThat(filter.covariance().headingStdDev())
         .isCloseTo(Math.hypot(1e-3, filter.gyroScaleStdDev() * SHOWN), within(1e-9));
   }
+
+  /**
+   * A camera known to put its measurements off has that taken off the measurement before it is
+   * compared, and what is unsure of it counts as more noise, after the gate's test. With the
+   * estimate's position good to 10 cm each way, and a measurement whose noise is [4 2; 2 9] cm²,
+   * the innovation's covariance is S = [104 2; 2 109] cm², and the gate tests d^T S^-1 d. The gain
+   * is then worked out with 100 cm² of doubt added to each axis of S.
+   */
+  @Test
+  void aKnownMissIsTakenOffAndItsDoubtCountsAfterTheGate() {
+    PoseFilter filter = placed(TEXTBOOK, 0.1, 0);
+    VisionMeasurement measurement =
+        new VisionMeasurement(
+            1,
+            new Pose2d(0.3, -0.2, Rotation2d.ZERO),
+            new PoseCovariance(0.0004, 0.0002, 0.0009, Double.POSITIVE_INFINITY),
+            new VisionMeasurement.Lever(Rotation2d.ZERO, new Translation2d(2, 1)),
+            "front",
+            List.of(26),
+            VisionMeasurement.Solver.HEADING_CONSTRAINED);
+
+    PoseFilter.Innovation innovation =
+        Objects.requireNonNull(
+            filter.innovation(measurement, 0, 3, places(measurement), 0.05, -0.08, 0.01));
+
+    double dx = 0.25;
+    double dy = -0.12;
+    assertThat(innovation.xMeters()).isCloseTo(dx, within(1e-12));
+    assertThat(innovation.yMeters()).isCloseTo(dy, within(1e-12));
+    double chiSquared = quadratic(0.0104, 0.0002, 0.0109, dx, dy);
+    assertThat(chiSquared).isCloseTo(7.439, within(0.001));
+    assertThat(innovation.positionChiSquared()).isCloseTo(chiSquared, within(1e-9));
+    assertThat(innovation.chiSquared()).isCloseTo(chiSquared, within(1e-9));
+
+    // The estimate moves by P S^-1 d, with the doubt in S: P is 100 cm² each way.
+    filter.correct(innovation);
+    double determinant = 0.0204 * 0.0209 - 0.0002 * 0.0002;
+    assertThat(filter.x())
+        .isCloseTo(0.01 * (0.0209 * dx - 0.0002 * dy) / determinant, within(1e-12));
+    assertThat(filter.y())
+        .isCloseTo(0.01 * (0.0204 * dy - 0.0002 * dx) / determinant, within(1e-12));
+  }
+
+  /** d^T S^-1 d for S = [sxx sxy; sxy syy]. */
+  private static double quadratic(double sxx, double sxy, double syy, double dx, double dy) {
+    return (syy * dx * dx - 2 * sxy * dx * dy + sxx * dy * dy) / (sxx * syy - sxy * sxy);
+  }
+
+  /**
+   * A heading claimed exactly, against an estimate sure of its own, leaves no spread to measure the
+   * heading's distance in: the measurement cannot be compared, though its position could be.
+   */
+  @Test
+  void aMeasurementWithNoSpreadInItsHeadingIsNotCompared() {
+    PoseFilter filter = placed(TEXTBOOK, 0.1, 0);
+    VisionMeasurement exact = withHeading(new Rotation2d(0.1), 0.05, 0);
+
+    assertThat(filter.innovation(exact, 0, 3, places(exact))).isNull();
+    VisionMeasurement unsure = withHeading(new Rotation2d(0.1), 0.05, 0.01);
+    assertThat(filter.innovation(unsure, 0, 3, places(unsure))).isNotNull();
+  }
 }
