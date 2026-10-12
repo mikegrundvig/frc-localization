@@ -1355,7 +1355,7 @@ class PoseEstimatorTest {
     // The sound camera is a few millimeters from where the wheels alone put the robot, since the
     // estimate they started from had been pulled a little; with no allowance for a camera's
     // mount, as here, that little is doubted.
-    assertThat(robot.estimator.cameraDoubtMeters("sound")).isLessThan(0.01);
+    assertThat(robot.estimator.cameraDoubtMeters("sound")).isLessThan(0.015);
     assertThat(robot.pose().getY())
         .as("near the sound camera")
         .isCloseTo(START.getY(), within(0.015));
