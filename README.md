@@ -83,7 +83,8 @@ Every localizer is handed the same measurements. None sees an image.
 
 **`DefaultLocalizer`** is the library's own estimator. It gates every measurement against the
 estimate, recovers when the cameras agree against odometry, lowers the wheels' trust when they
-slip, and keeps an honest uncertainty. It reports every option.
+slip, and keeps an honest uncertainty. It estimates the gyro's scale and drift, and watches each
+camera against the others for one knocked on its mount or stamped late. It reports every option.
 
 **`WpilibLocalizer`** is WPILib's `SwerveDrivePoseEstimator`, fed as the default one is: every
 wheel reading, and the pipeline's measurements with their standard deviations. It keeps the
@@ -184,11 +185,16 @@ What it found, in simulation only:
 - In clean driving the two are roughly equal. Both hold the pose to about a centimeter.
 - The default localizer is better against bad camera data, such as a camera that keeps misreading
   a tag, and against wheels that slip.
-- WPILib's estimator, behind the kind of vision filter strong teams write for it, is better when
-  the gyro reads wrong or a camera has been knocked on its mount. The default localizer leans on
-  the gyro for heading, and that costs it there.
+- With the gyro reading wrong, or a camera knocked on its mount or stamped late, the two are
+  within a centimeter of each other. The default localizer used to lose there. It now estimates
+  the gyro's scale and drift, and takes off what a knocked or late camera puts its measurements
+  off by. The simulator's gyro and cameras are simpler than real ones, so this is the result to
+  trust least.
+- WPILib's estimator, behind the kind of vision filter strong teams write for it, moves more
+  smoothly. The default localizer corrects a wrong estimate in one step, which can be tens of
+  centimeters after a shove.
 - Most of each difference comes from how images are solved and filtered, not from the estimator.
-  Fed the very same measurements, the two estimators are close.
+  Fed the very same measurements, the two estimators are close in most scenarios.
 - The study did not measure a robot that chose `WpilibLocalizer`. Such a robot's images are solved
   without the gyro's heading, which none of the study's contenders did with this pipeline.
 
