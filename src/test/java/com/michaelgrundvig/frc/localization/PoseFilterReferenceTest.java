@@ -526,6 +526,19 @@ class PoseFilterReferenceTest {
           p[2][2] = headingVariance;
           unrelateHeading();
           setPosition(positionVariance, 0, positionVariance);
+        } else if (u < 0.99) {
+          // The gyro's drift read off at rest: a measurement of the drift alone.
+          double read = 1e-3 * random.nextGaussian();
+          double variance = logUniform(random, 1e-9, 1e-5);
+          filter.sawGyroDrift(read, variance);
+          double spread = p[DRIFT][DRIFT] + variance;
+          double[][] gain = new double[N][1];
+          for (int i = 0; i < STATES; i++) {
+            gain[STATE_AT[i]][0] = p[STATE_AT[i]][DRIFT] / spread;
+          }
+          double[][] h = new double[1][N];
+          h[0][DRIFT] = 1;
+          joseph(gain, h, new double[][] {{variance}}, new double[] {read - mean[4]});
         } else {
           // What the history keeps, it gives back exactly.
           double[] stored = new double[filter.uncertaintyLength()];

@@ -231,14 +231,15 @@ class PoseEstimatorTest {
 
   /**
    * A minute sitting still with no camera. The heading was placed to 0.02 rad, and the gyro's drift
-   * that does not repeat adds 0.5° in the minute. Where the gyro's steady drift is estimated, it
-   * has not been yet, so what it may be adds too: 5° a minute, for a minute.
+   * that does not repeat adds 0.5° in the minute. Where the gyro's steady drift is estimated, it is
+   * read off as the robot stands, each second to what that same noise allows. So what the steady
+   * drift may be adds only a little: the heading is 8% more unsure than with the drift considered,
+   * where 5° a minute never read off would make it four times as unsure.
    */
   @Test
   void theGyroDriftsSoHeadingGrowsUnsureOverTime() {
     double placed = 0.02;
     double wandering = Math.toRadians(0.5);
-    double steady = Math.toRadians(EstimatorConfig.DEFAULTS.gyroDriftStdDevDegreesPerMinute());
     EstimatorConfig considering =
         EstimatorConfigBuilder.builder(TEXTBOOK)
             .gyroErrors(EstimatorConfig.GyroErrors.CONSIDERED)
@@ -248,12 +249,11 @@ class PoseEstimatorTest {
     considers.estimator.reset(new PoseReset(T0, START, PLACED, "placed"));
     considers.drive(15_000, 0, 0, 0);
 
+    double considered = Math.hypot(placed, wandering);
     assertThat(considers.estimate().covariance().headingStdDev())
-        .isCloseTo(Math.hypot(placed, wandering), within(1e-4));
-    // A little over the three in squares: the steady drift may itself have changed in the minute.
-    double together = Math.sqrt(placed * placed + wandering * wandering + steady * steady);
+        .isCloseTo(considered, within(1e-4));
     assertThat(estimates.estimate().covariance().headingStdDev())
-        .isCloseTo(together, within(0.02 * together));
+        .isBetween(1.04 * considered, 1.12 * considered);
   }
 
   @Test
@@ -1364,6 +1364,101 @@ class PoseEstimatorTest {
     assertThat(robot.estimator.cameraDoubtMeters("knocked")).as("pushed back").isZero();
     assertThat(robot.pose().getY()).isCloseTo(START.getY(), within(0.005));
     assertThat(robot.estimator.cameraDoubtMeters("a camera never heard from")).isZero();
+  }
+
+  /**
+   * Stands still for a while, the wheels reporting no motion, while the gyro's yaw turns at a rate
+   * of its own: its drift, or the robot being carried.
+   */
+  private static void stand(Robot robot, double seconds, double gyroDegreesPerMinute) {
+    double dt = STEP / 1e9;
+    int steps = (int) Math.round(seconds / dt);
+    for (int i = 0; i < steps; i++) {
+      robot.time += STEP;
+      robot.gyroYaw += Math.toRadians(gyroDegreesPerMinute) / 60 * dt;
+      robot.estimator.addOdometry(
+          robot.time, new BodyMotion(0, 0, 0, 0), robot.gyroYaw, YawSource.GYRO);
+    }
+  }
+
+  private static double headingDegrees(Robot robot) {
+    return robot.pose().getRotation().minus(START.getRotation()).getDegrees();
+  }
+
+  /**
+   * A gyro that turns 3° a minute while the robot stands still: the estimator reads the drift off
+   * each second of standing, so with no camera at all the heading stays put and the drift is found.
+   * Each second reads the drift to 3.9° a minute (0.5° of noise in a minute, over a second), and
+   * the estimator starts 5° a minute unsure, so after 20 of them it has 97% of the drift and is
+   * 0.86° a minute unsure. A gyro only considered learns nothing, and its heading goes with it.
+   */
+  @Test
+  void aGyroThatDriftsWhileTheRobotStandsIsReadOffAndTakenOut() {
+    Robot robot = new Robot();
+    stand(robot, 20.1, 3.0);
+
+    assertThat(robot.estimator.gyroDriftDegreesPerMinute()).isCloseTo(3.0, within(0.15));
+    assertThat(robot.estimator.gyroDriftStdDevDegreesPerMinute()).isBetween(0.7, 1.0);
+    assertThat(headingDegrees(robot))
+        .as("the heading, a degree of drift on")
+        .isCloseTo(0, within(0.05));
+
+    Robot considering =
+        new Robot(
+            EstimatorConfigBuilder.builder(TEXTBOOK)
+                .gyroErrors(EstimatorConfig.GyroErrors.CONSIDERED)
+                .build(),
+            new PoseReset(0, START, PLACED, "start"));
+    stand(considering, 20.1, 3.0);
+    assertThat(considering.estimator.gyroDriftDegreesPerMinute()).isZero();
+    assertThat(headingDegrees(considering)).isCloseTo(1.0, within(0.02));
+  }
+
+  /**
+   * A robot lifted and carried turns with its wheels still. Turned at 2° a second, which is many
+   * times what a gyro drifts, it teaches the estimator nothing of the drift, and the heading turns
+   * with the gyro.
+   */
+  @Test
+  void aRobotCarriedWithItsWheelsStillTeachesNothingOfTheDrift() {
+    Robot robot = new Robot();
+    stand(robot, 5.0, 120.0);
+
+    assertThat(robot.estimator.gyroDriftDegreesPerMinute()).isZero();
+    assertThat(headingDegrees(robot)).isCloseTo(10.0, within(0.01));
+  }
+
+  /** The drift is read over a whole second of standing: a robot that moves in it starts again. */
+  @Test
+  void aStretchOfStandingThatTheRobotMovesInReadsNothing() {
+    Robot robot = new Robot();
+    stand(robot, 0.9, 3.0);
+    robot.drive(1, 0.5, 0, 0);
+    stand(robot, 0.9, 3.0);
+    assertThat(robot.estimator.gyroDriftDegreesPerMinute()).as("two short stretches").isZero();
+
+    stand(robot, 0.2, 3.0);
+    assertThat(robot.estimator.gyroDriftDegreesPerMinute()).as("a whole one").isGreaterThan(1.0);
+  }
+
+  /**
+   * A late image makes the estimator go back and replay its history. The replay reads the drift off
+   * the same stretches of standing again: an image from before the second stretch ended, of the
+   * robot where it is, leaves the drift where both stretches put it (2.3° a minute of the 3), not
+   * where the first alone did (1.9).
+   */
+  @Test
+  void aReplayReadsTheDriftOffTheSameStretchesAgain() {
+    Robot robot = new Robot();
+    stand(robot, 2.2, 3.0);
+    double before = robot.estimator.gyroDriftDegreesPerMinute();
+    assertThat(before).isCloseTo(2.3, within(0.05));
+
+    long halfwayThroughTheSecondStretch = robot.time - (long) (0.7e9);
+    robot.see(
+        robot.pose(), halfwayThroughTheSecondStretch, PoseCovariance.fromStdDevs(0.05, 0.05, 1));
+
+    assertThat(robot.estimator.gyroDriftDegreesPerMinute()).isCloseTo(before, within(0.05));
   }
 
   /** A field's tags, numbered from 1. */

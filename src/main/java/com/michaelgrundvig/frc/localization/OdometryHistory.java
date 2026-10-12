@@ -101,6 +101,15 @@ final class OdometryHistory {
   private final double[] gyroSecondsAfter;
 
   /**
+   * The gyro's drift as a stretch of standing still that ended with each step read it, in radians a
+   * second, and that reading's variance ({@link GyroAtRest}). Not a number for a step no such
+   * stretch ended with, which is nearly every one.
+   */
+  private final double[] driftSeenAtRest;
+
+  private final double[] driftSeenVariance;
+
+  /**
    * How far the wheels and the gyro alone had carried the robot over the field, in all, as each
    * step ended, in meters along x and along y: the sum of every step's move as the filter first
    * predicted it, counted from when the history started. No camera's correction is in it, so the
@@ -150,6 +159,8 @@ final class OdometryHistory {
     yawAfterRadians = new double[capacity];
     gyroTurnAfterRadians = new double[capacity];
     gyroSecondsAfter = new double[capacity];
+    driftSeenAtRest = new double[capacity];
+    driftSeenVariance = new double[capacity];
     carriedXAfter = new double[capacity];
     carriedYAfter = new double[capacity];
     carriedVarianceAfter = new double[capacity];
@@ -218,7 +229,31 @@ final class OdometryHistory {
     yawAfterRadians[slot] = yawRadians;
     gyroTurnAfterRadians[slot] = gyroTurnAfterRadians[previous] + gyroTurn;
     gyroSecondsAfter[slot] = gyroSecondsAfter[previous] + gyroSeconds;
+    driftSeenAtRest[slot] = Double.NaN;
     return newestStep();
+  }
+
+  /**
+   * Notes that a stretch of standing still ended with the newest step, and what it read of the
+   * gyro's drift, so a replay corrects the drift by it again at the same step.
+   */
+  void sawDriftOverNewestStep(double radiansPerSecond, double variance) {
+    int slot = slotOf(newestStep());
+    driftSeenAtRest[slot] = radiansPerSecond;
+    driftSeenVariance[slot] = variance;
+  }
+
+  /**
+   * The gyro's drift as a stretch of standing still that ended with a step read it, in radians a
+   * second, or not a number where none did.
+   */
+  double driftSeenAtRest(int step) {
+    return driftSeenAtRest[slotOf(step)];
+  }
+
+  /** That reading's variance, in (radians a second) squared. */
+  double driftSeenVariance(int step) {
+    return driftSeenVariance[slotOf(step)];
   }
 
   /**

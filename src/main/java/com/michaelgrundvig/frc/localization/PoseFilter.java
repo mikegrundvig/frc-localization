@@ -225,6 +225,9 @@ final class PoseFilter {
   /** C, the state's cross-covariance with the considered errors: 5 rows of consideredCount. */
   private final double[] crossCovariance;
 
+  /** The gain of a drift read at rest, kept so that reading one makes nothing. */
+  private final double[] driftGain = new double[STATES];
+
   /** The working of camera measurements against this filter's P and C, which it shares. */
   private final CameraCorrection correction;
 
@@ -609,6 +612,57 @@ final class PoseFilter {
     gyroScale += correction.stateCorrection(GYRO_SCALE);
     gyroDrift += correction.stateCorrection(GYRO_DRIFT);
     correction.correctUncertainty();
+  }
+
+  /**
+   * Corrects the state by the gyro's drift as it was read off directly, while the robot stood still
+   * ({@link GyroAtRest}). The reading is the drift itself and noise of its own, so this is a Kalman
+   * update whose measurement sees one value of the state, and its working is all scalars. With d
+   * the drift's place in the state and R the reading's variance:
+   *
+   * <pre>
+   *   S = P[d][d] + R                 the innovation's variance
+   *   K = P[.][d] / S                 the gain, one number for each value of the state
+   *   state = state + K (reading - drift)
+   *   P = P - K S K^T
+   *   C = C - K C[d][.]
+   * </pre>
+   *
+   * <p>The heading over the stretch was predicted with the drift as it was taken to be, so the
+   * heading and the drift vary together, and the gain corrects the heading by what the drift was
+   * off over that time.
+   *
+   * @param radiansPerSecond the drift read: how much faster the robot turned than its gyro said
+   * @param variance the reading's variance, in (radians a second) squared
+   */
+  void sawGyroDrift(double radiansPerSecond, double variance) {
+    double spread = covariance[cell(GYRO_DRIFT, GYRO_DRIFT)] + variance;
+    // A drift that is not estimated has no variance, and nothing varies with it: the gain is zero.
+    boolean somethingToLearn = spread > 0;
+    if (!somethingToLearn) {
+      return;
+    }
+    double miss = radiansPerSecond - gyroDrift;
+    for (int state = 0; state < STATES; state++) {
+      driftGain[state] = covariance[cell(state, GYRO_DRIFT)] / spread;
+    }
+    x += driftGain[X] * miss;
+    y += driftGain[Y] * miss;
+    headingOffset += driftGain[HEADING] * miss;
+    gyroScale += driftGain[GYRO_SCALE] * miss;
+    gyroDrift += driftGain[GYRO_DRIFT] * miss;
+    for (int row = 0; row < STATES; row++) {
+      for (int column = 0; column < STATES; column++) {
+        covariance[cell(row, column)] -= driftGain[row] * spread * driftGain[column];
+      }
+    }
+    for (int column = 0; column < consideredCount; column++) {
+      // The drift's own row is among those corrected, so its value is read before any is.
+      double driftDependsBy = crossCovariance[cross(GYRO_DRIFT, column)];
+      for (int state = 0; state < STATES; state++) {
+        crossCovariance[cross(state, column)] -= driftGain[state] * driftDependsBy;
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------------------------

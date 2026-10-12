@@ -102,6 +102,9 @@ public final class PoseEstimator {
   private final ErrorPlaces places;
   private final Recovery recovery;
 
+  /** Reads the gyro's drift off each stretch of standing still. */
+  private final GyroAtRest gyroAtRest;
+
   // The IMUs' readings, unwrapped into one continuous yaw.
 
   /** Whether the first odometry step has come: nothing can be estimated before it. */
@@ -243,6 +246,10 @@ public final class PoseEstimator {
     wheelDoubt = new WheelDoubt(config);
     places = new ErrorPlaces(tags);
     recovery = new Recovery(config);
+    gyroAtRest =
+        new GyroAtRest(
+            headingVariancePerSecond,
+            Math.toRadians(config.gyroDriftStdDevDegreesPerMinute()) / SECONDS_PER_MINUTE);
     watch =
         new CameraWatch(
             config.cameraWatchMeasurements(),
@@ -322,10 +329,19 @@ public final class PoseEstimator {
       return;
     }
     YawSource turnedBy = whatTurnsTheStep(readBy);
+    double stepSeconds = Timestamps.toSeconds(timestampNanos - previousTime);
+    double driftSeen = Double.NaN;
     if (turnedBy == YawSource.WHEELS) {
       yaw += motion.dthetaRadians();
+      gyroAtRest.clear();
     } else {
-      yaw += MathUtil.angleModulus(yawRadians - lastImuYaw);
+      double imuTurn = MathUtil.angleModulus(yawRadians - lastImuYaw);
+      yaw += imuTurn;
+      if (turnedBy == YawSource.GYRO) {
+        driftSeen = gyroAtRest.step(stepSeconds, motion, imuTurn);
+      } else {
+        gyroAtRest.clear();
+      }
     }
     if (readBy != YawSource.WHEELS) {
       lastImuYaw = yawRadians;
@@ -336,7 +352,7 @@ public final class PoseEstimator {
     double shareAcrossTheField = wheelDoubt.shareOfTravelAcrossTheField();
     double addedVariance =
         wheelDoubt.addedVariance(
-            Timestamps.toSeconds(timestampNanos - previousTime),
+            stepSeconds,
             Math.hypot(motion.dxMeters(), motion.dyMeters()),
             shareThatCounts,
             motion.residualMeters());
@@ -349,11 +365,15 @@ public final class PoseEstimator {
             addedVariance,
             turnedBy,
             yaw);
+    if (!Double.isNaN(driftSeen)) {
+      history.sawDriftOverNewestStep(driftSeen, gyroAtRest.variance());
+    }
     double xBefore = filter.x();
     double yBefore = filter.y();
     predictThrough(step, 0, 1);
     history.movedOverNewestStep(
         filter.x() - xBefore, filter.y() - yBefore, positionVarianceOf(step));
+    learnTheDriftSeenOver(step);
     history.store(step, filter);
     dropWhatTheHistoryNoLongerReaches();
   }
@@ -460,6 +480,19 @@ public final class PoseEstimator {
     return positionVariancePerMeter * distance
         + positionVariancePerRadian * Math.abs(history.turnOver(step))
         + history.addedPositionVariance(step);
+  }
+
+  /**
+   * Where a stretch of standing still ended with this step, corrects the gyro's drift by what the
+   * stretch read of it ({@link GyroAtRest}). It runs as each step ends, the first time and in every
+   * replay, so a replay comes to the same drift.
+   */
+  private void learnTheDriftSeenOver(int step) {
+    double driftSeen = history.driftSeenAtRest(step);
+    boolean aStretchEndedHere = !Double.isNaN(driftSeen);
+    if (aStretchEndedHere) {
+      filter.sawGyroDrift(driftSeen, history.driftSeenVariance(step));
+    }
   }
 
   /** Drops steps older than the history keeps, and the measurements at or before its new start. */
@@ -692,6 +725,7 @@ public final class PoseEstimator {
         gateAndApply(replayed, history.yawPartWayThrough(step, fraction), decisions);
       }
       predictThrough(step, predictedUpTo, 1);
+      learnTheDriftSeenOver(step);
       history.store(step, filter);
     }
     // Anything left is at the starting step itself, which happens only when the history is a single

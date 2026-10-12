@@ -48,7 +48,9 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  * @param gyroDriftStdDevDegreesPerMinute how fast the gyro may drift steadily, the same every
  *     second, before the cameras have said anything of it: what its calibration at rest left, or a
  *     robot that was moved while it calibrated. It counts only where the gyro's errors are
- *     estimated; {@code headingDriftDegreesPerMinute} is the drift that does not repeat.
+ *     estimated; {@code headingDriftDegreesPerMinute} is the drift that does not repeat. A robot
+ *     standing still reads the drift off its gyro, each second of standing, and takes a stretch
+ *     whose drift is past three times this for a robot being carried.
  * @param gyroDriftWanderDegreesPerMinute how far that steady drift may change in a minute, in
  *     degrees a minute, as the part warms
  * @param backupHeadingStdDevDegreesPerTurn the same for the backup IMU, while it turns odometry in
@@ -87,8 +89,9 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     every camera that sees it and every time it's seen, so the estimator keeps it apart for each
  *     tag, and a tag several cameras see counts once
  * @param headingCorrection what may correct the heading the gyro owns, beside measurements with a
- *     heading of their own; three ways under comparison (docs/testing.md), {@link
- *     HeadingCorrection#HEADING_MEASUREMENTS} until the team chooses
+ *     heading of their own; three ways under comparison (docs/testing.md). {@link
+ *     HeadingCorrection#EVERY_FIX} is the default: it is what lets the cameras find the gyro's
+ *     errors
  * @param cameraShiftCorrelationMeters how far the robot moves before what a camera's headings share
  *     is mostly new ({@code cameraShiftStdDevDegrees}): it sees other tags, or the same ones from
  *     elsewhere
