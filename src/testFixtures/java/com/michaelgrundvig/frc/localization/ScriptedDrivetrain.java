@@ -51,6 +51,14 @@ final class ScriptedDrivetrain {
    */
   boolean gyroFrozen;
 
+  /**
+   * The gyro restarts: from the next loop its yaw reads from zero, wherever the robot points, and
+   * the rate it reports is still the robot's own turning.
+   */
+  void gyroRestarts() {
+    gyroYaw = 0;
+  }
+
   /** The robot tilted by hand, nose down and left side up, beyond any bump. */
   double pitch;
 

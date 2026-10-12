@@ -535,6 +535,25 @@ public final class LocalizationService {
     return wheelVelocities.omega;
   }
 
+  /**
+   * How fast the robot is turning this loop, for how sharp its cameras' images are: as the IMU's
+   * own rate reads it, which is the turning itself. Without an IMU that has readings, it is {@link
+   * #yawRateRadiansPerSecond}.
+   *
+   * <p>The localizer's figure is how far the yaw changed over a stretch of time. A yaw that steps
+   * is not a turn, and blurs no image: a gyro that restarts and reads zero, or a robot carried a
+   * quarter turn while disabled, between one reading and the next. Taken as turning, a step would
+   * have every image thrown out for the third of a second after it, just when the cameras are
+   * needed to say where the robot now is.
+   */
+  private double turningRadiansPerSecond() {
+    ImuReadings imu = imuReadingsThisLoop;
+    if (imu != null && Double.isFinite(imu.yawRateRadiansPerSecond())) {
+      return imu.yawRateRadiansPerSecond();
+    }
+    return yawRateRadiansPerSecond();
+  }
+
   /** A pose on the field in 3D: as high as the ground under it, tilted as the IMU says now. */
   public Pose3d pose3d(Pose2d pose) {
     return new Pose3d(
@@ -576,7 +595,7 @@ public final class LocalizationService {
    * before the loop's images.
    */
   private void takeMotion() {
-    recentYawRates[yawRateLoop] = Math.abs(yawRateRadiansPerSecond());
+    recentYawRates[yawRateLoop] = Math.abs(turningRadiansPerSecond());
     double recentYawRate = 0;
     for (double rate : recentYawRates) {
       recentYawRate = Math.max(recentYawRate, rate);

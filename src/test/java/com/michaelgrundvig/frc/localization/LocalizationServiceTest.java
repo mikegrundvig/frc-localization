@@ -816,6 +816,30 @@ class LocalizationServiceTest {
     assertThat(headingError(localization, robot)).as("degrees").isLessThan(1);
   }
 
+  /**
+   * A gyro that restarts reads zero wherever the robot points: its yaw steps by 0.3 rad between two
+   * readings, and the robot turned nothing. The step is not taken for turning, so no image is
+   * thrown out as blurred after it. Taken as a change of yaw over time, it would read as a turn of
+   * tens of radians a second, and every image of the next third of a second would go.
+   */
+  @Test
+  void aYawThatStepsIsNotTakenForTurning() {
+    LocalizationService localization = placed();
+    ScriptedDrivetrain robot = scripted();
+    ChassisVelocities ahead = new ChassisVelocities(0.5, 0, 0);
+    drive(localization, robot, 20, ahead, true);
+
+    robot.gyroRestarts();
+    List<LocalizationOutput> after = drive(localization, robot, 5, ahead, true);
+
+    assertThat(localization.capture(robot.now()).recentYawRateRadiansPerSecond())
+        .as("the fastest the robot turned lately")
+        .isLessThan(0.1);
+    for (LocalizationOutput output : after) {
+      assertThat(output.frames()).extracting(FrameVerdict::verdict).doesNotContain(Verdict.TURNING);
+    }
+  }
+
   private static double headingError(LocalizationService localization, ScriptedDrivetrain robot) {
     return Math.abs(
         localization.pose().getRotation().minus(robot.truth().getRotation()).getDegrees());

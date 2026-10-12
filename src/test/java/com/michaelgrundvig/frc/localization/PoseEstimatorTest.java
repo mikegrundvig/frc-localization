@@ -467,33 +467,33 @@ class PoseEstimatorTest {
   }
 
   /**
-   * Three images agree the robot was knocked a meter sideways, but a fourth just before them, two
-   * meters off, holds the recovery back until it's older than the recovery window. Then the camera
-   * is unplugged, and the three recover the estimate a second after the first was taken. The images
-   * are as old as when they were taken, not when they were acted on: a second after the last of
-   * them, the estimate is dead reckoning, not tracking tags.
+   * Three images agree the robot was knocked a meter sideways. A fourth just before them, two
+   * meters off, does not hold the recovery back: it was taken while the robot was still being
+   * moved, and the latest three are what the cameras agree on now. Then the camera is unplugged.
+   * The estimate rests on images as old as when they were taken: a second after the last of them,
+   * it is dead reckoning, not tracking tags.
    */
   @Test
-  void aRecoveryCountsItsImagesAsOldAsWhenTheyWereTaken() {
+  void aRecoveryGoesByTheLatestImagesAndCountsThemAsOldAsTheyAre() {
     Robot robot = new Robot().drive(10, 0, 0, 0);
     int loop = 5; // steps a robot loop, 20 ms
     robot.drive(loop, 0, 0, 0).see(new Pose2d(1, 3, Rotation2d.ZERO), robot.time, position(0.05));
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
       robot.drive(loop, 0, 0, 0).see(new Pose2d(1, 2, Rotation2d.ZERO), robot.time, position(0.05));
     }
-    long lastTaken = robot.time;
-    assertThat(robot.estimate().health().recoveries()).isZero();
+    assertThat(robot.estimate().health().recoveries())
+        .as("two that agree, and one before them that does not")
+        .isZero();
 
-    while (robot.estimate().health().recoveries() == 0) {
-      robot.drive(loop, 0, 0, 0).estimator.update();
-    }
-    double recoveredAfter = (robot.time - lastTaken) / 1e9;
+    robot.drive(loop, 0, 0, 0).see(new Pose2d(1, 2, Rotation2d.ZERO), robot.time, position(0.05));
+    long lastTaken = robot.time;
+
+    assertThat(robot.estimate().health().recoveries()).as("the third that agrees").isEqualTo(1);
+    assertThat(robot.pose().getTranslation().getDistance(new Translation2d(1, 2))).isLessThan(1e-9);
+    assertThat(robot.estimate().mode()).isEqualTo(LocalizationEstimate.Mode.TRACKING);
     while (robot.time - lastTaken <= 1e9 * TEXTBOOK.visionTimeoutSeconds()) {
       robot.drive(loop, 0, 0, 0).estimator.update();
     }
-
-    assertThat(recoveredAfter).as("seconds after the last image").isBetween(0.9, 1.0);
-    assertThat(robot.pose().getTranslation().getDistance(new Translation2d(1, 2))).isLessThan(1e-9);
     assertThat(robot.estimate().health().visionAgeSeconds())
         .isCloseTo((robot.time - lastTaken) / 1e9, within(1e-9));
     assertThat(robot.estimate().mode()).isEqualTo(LocalizationEstimate.Mode.DEAD_RECKONING);
