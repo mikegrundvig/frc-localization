@@ -94,6 +94,23 @@ final class OdometryHistory {
    */
   private final double[] gyroSecondsAfter;
 
+  /**
+   * How far the wheels and the gyro alone had carried the robot over the field, in all, as each
+   * step ended, in meters along x and along y: the sum of every step's move as the filter first
+   * predicted it, counted from when the history started. No camera's correction is in it, so the
+   * difference between two steps' sums is how the robot moved between them by odometry alone.
+   */
+  private final double[] carriedXAfter;
+
+  private final double[] carriedYAfter;
+
+  /**
+   * How unsure odometry alone had become of where the robot is, in all, as each step ended, as a
+   * variance along each axis: the sum of the position variance every step added, for its distance,
+   * its turning, and whatever made its wheels suspect, counted from when the history started.
+   */
+  private final double[] carriedVarianceAfter;
+
   // The filter's state once each step had been applied. A replay rewrites these.
 
   private final double[] filterXAfter;
@@ -127,6 +144,9 @@ final class OdometryHistory {
     yawAfterRadians = new double[capacity];
     gyroTurnAfterRadians = new double[capacity];
     gyroSecondsAfter = new double[capacity];
+    carriedXAfter = new double[capacity];
+    carriedYAfter = new double[capacity];
+    carriedVarianceAfter = new double[capacity];
     filterXAfter = new double[capacity];
     filterYAfter = new double[capacity];
     filterHeadingOffsetAfter = new double[capacity];
@@ -147,6 +167,9 @@ final class OdometryHistory {
     yawAfterRadians[oldestSlot] = yawRadians;
     gyroTurnAfterRadians[oldestSlot] = 0;
     gyroSecondsAfter[oldestSlot] = 0;
+    carriedXAfter[oldestSlot] = 0;
+    carriedYAfter[oldestSlot] = 0;
+    carriedVarianceAfter[oldestSlot] = 0;
   }
 
   /**
@@ -190,6 +213,60 @@ final class OdometryHistory {
     gyroTurnAfterRadians[slot] = gyroTurnAfterRadians[previous] + gyroTurn;
     gyroSecondsAfter[slot] = gyroSecondsAfter[previous] + gyroSeconds;
     return newestStep();
+  }
+
+  /**
+   * Notes how far the filter's prediction moved the robot over the newest step, on the field, as
+   * the step was first predicted through: what the wheels and the gyro alone say of it, and the
+   * position variance the step adds.
+   */
+  void movedOverNewestStep(double xMeters, double yMeters, double positionVariance) {
+    int slot = slotOf(newestStep());
+    int previous = slotOf(newestStep() - 1);
+    carriedXAfter[slot] = carriedXAfter[previous] + xMeters;
+    carriedYAfter[slot] = carriedYAfter[previous] + yMeters;
+    carriedVarianceAfter[slot] = carriedVarianceAfter[previous] + positionVariance;
+  }
+
+  /**
+   * How unsure where odometry alone has the robot is as a step ends ({@link #xByOdometryAlone}), as
+   * a variance along each axis, in square meters: what the steps since the oldest kept have added.
+   * The estimate's own doubt at the oldest step is left out: every camera's measurement is set
+   * against the same place, so that part is the same in all of them.
+   */
+  double varianceByOdometryAlone(int step) {
+    return carriedVarianceAfter[slotOf(step)] - carriedVarianceAfter[slotOf(OLDEST_STEP)];
+  }
+
+  /**
+   * Where the robot would be part of the way through a step, along the field's x, had nothing but
+   * the wheels and the gyro moved the estimate since the oldest step kept: the filter's position as
+   * it was stored for the oldest step, carried on by odometry alone. It is what a camera's
+   * measurement is set against to see whether the camera, and not the estimate, has moved ({@link
+   * CameraWatch}).
+   *
+   * @param fraction how far through the step: 0 as it begins, 1 as it ends
+   */
+  double xByOdometryAlone(int step, double fraction) {
+    return filterXAfter[slotOf(OLDEST_STEP)] + carriedSince(carriedXAfter, step, fraction);
+  }
+
+  /** The same along y. */
+  double yByOdometryAlone(int step, double fraction) {
+    return filterYAfter[slotOf(OLDEST_STEP)] + carriedSince(carriedYAfter, step, fraction);
+  }
+
+  /**
+   * How far odometry alone carried the robot from the oldest step to part of the way through one.
+   */
+  private double carriedSince(double[] carriedAfter, int step, double fraction) {
+    double atOldest = carriedAfter[slotOf(OLDEST_STEP)];
+    if (step == OLDEST_STEP) {
+      return 0;
+    }
+    double before = carriedAfter[slotOf(step - 1)];
+    double after = carriedAfter[slotOf(step)];
+    return before + fraction * (after - before) - atOldest;
   }
 
   /** How many steps are kept. Their numbers run from {@link #OLDEST_STEP} to this less one. */

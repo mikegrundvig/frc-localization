@@ -140,6 +140,23 @@ class PoseEstimatorTest {
       return estimator.update().get(0);
     }
 
+    /**
+     * One camera's position solved with the gyro's heading, good to 2 cm, from tags 3 m ahead of
+     * the robot, taken now.
+     */
+    VisionDecision seeFrom(String camera, Pose2d pose) {
+      estimator.addVision(
+          new VisionMeasurement(
+              time,
+              pose,
+              position(0.02),
+              new VisionMeasurement.Lever(estimator.pose().getRotation(), new Translation2d(3, 0)),
+              camera,
+              List.of(26),
+              VisionMeasurement.Solver.HEADING_CONSTRAINED));
+      return estimator.update().get(0);
+    }
+
     /** A camera measurement with heading, from several tags, taken now. */
     VisionDecision seeWithHeading(Pose2d pose) {
       estimator.addVision(
@@ -1296,6 +1313,57 @@ class PoseEstimatorTest {
     assertThat(worstMissDegrees[0]).as("after a turn, before any camera").isLessThan(0.05);
     assertThat(foundPercent[1]).as("a scale only considered").isZero();
     assertThat(worstMissDegrees[1]).isCloseTo(0.9, within(0.1));
+  }
+
+  /**
+   * Two cameras' measurements as the robot drives straight ahead, an image from each every 40 ms,
+   * the tags 3 m ahead: the sound camera puts the robot where it is, and the other puts it some way
+   * to its left.
+   *
+   * @param seconds how long to drive
+   * @param knockedOffMeters how far to the robot's left the knocked camera puts it
+   */
+  private static void driveWithTwoCameras(Robot robot, double seconds, double knockedOffMeters) {
+    int images = (int) Math.round(seconds / 0.04);
+    for (int image = 0; image < images; image++) {
+      robot.drive(10, 1.0, 0, 0);
+      double travelled = (robot.time - T0) / 1e9;
+      Pose2d truth = new Pose2d(START.getX() + travelled, START.getY(), Rotation2d.ZERO);
+      robot.seeFrom("sound", truth);
+      robot.seeFrom(
+          "knocked", new Pose2d(truth.getX(), truth.getY() + knockedOffMeters, Rotation2d.ZERO));
+    }
+  }
+
+  /**
+   * A camera knocked on its mount puts the robot 8 cm to one side in every image, beside a sound
+   * camera. Within two seconds the estimator's watch has it in doubt by most of that, takes that
+   * off the knocked camera's measurements, and the estimate stays near the sound camera: without
+   * the watch it would sit between the two, 4 cm off. Pushed back, the camera is trusted again a
+   * few seconds on.
+   */
+  @Test
+  void aKnockedCameraIsFoundOutAndTakenOffWithinSeconds() {
+    Robot robot = new Robot();
+
+    driveWithTwoCameras(robot, 1.0, 0);
+    assertThat(robot.estimator.cameraDoubtMeters("knocked")).as("before the knock").isZero();
+    driveWithTwoCameras(robot, 2.0, 0.08);
+
+    // Two seconds are fifty of its images: the average of its latest is two thirds the new miss.
+    assertThat(robot.estimator.cameraDoubtMeters("knocked")).isBetween(0.045, 0.085);
+    // The sound camera is a few millimeters from where the wheels alone put the robot, since the
+    // estimate they started from had been pulled a little; with no allowance for a camera's
+    // mount, as here, that little is doubted.
+    assertThat(robot.estimator.cameraDoubtMeters("sound")).isLessThan(0.01);
+    assertThat(robot.pose().getY())
+        .as("near the sound camera")
+        .isCloseTo(START.getY(), within(0.015));
+
+    driveWithTwoCameras(robot, 6.0, 0);
+    assertThat(robot.estimator.cameraDoubtMeters("knocked")).as("pushed back").isZero();
+    assertThat(robot.pose().getY()).isCloseTo(START.getY(), within(0.005));
+    assertThat(robot.estimator.cameraDoubtMeters("a camera never heard from")).isZero();
   }
 
   /** A field's tags, numbered from 1. */

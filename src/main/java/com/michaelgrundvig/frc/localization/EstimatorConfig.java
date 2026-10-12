@@ -71,6 +71,11 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     angle and is shared by every camera seeing it face-on: a stop-gap (docs/values.md).
  * @param cameraShiftStdDevDegrees and how far its headings may, beyond its turn: tags off the
  *     layout turn a multi-tag solve's heading by how far off they are over how far apart they sit
+ * @param cameraWatchMeasurements how many of a camera's latest accepted measurements its mount is
+ *     watched by: a camera whose measurements keep landing to one side of the other cameras', over
+ *     about this many, counts for less by how far, and counts in full again once they stop. Enough
+ *     that the noise of single images averages out (50 images' noise of 2 cm is 3 mm), and few
+ *     enough that a knocked camera is found within a couple of seconds at 25 images a second.
  * @param tagPlacementStdDevMeters how far each tag may sit from where the field's layout says,
  *     along the field and across it (the field's tolerance, and how it was built): the same for
  *     every camera that sees it and every time it's seen, so the estimator keeps it apart for each
@@ -131,6 +136,7 @@ public record EstimatorConfig(
     double cameraTurnStdDevDegrees,
     double cameraShiftStdDevMeters,
     double cameraShiftStdDevDegrees,
+    int cameraWatchMeasurements,
     double tagPlacementStdDevMeters,
     HeadingCorrection headingCorrection,
     double cameraShiftCorrelationMeters,
@@ -173,6 +179,7 @@ public record EstimatorConfig(
           .cameraTurnStdDevDegrees(0.25)
           .cameraShiftStdDevMeters(0.005)
           .cameraShiftStdDevDegrees(2.0)
+          .cameraWatchMeasurements(50)
           .tagPlacementStdDevMeters(0.01)
           .headingCorrection(HeadingCorrection.EVERY_FIX)
           .cameraShiftCorrelationMeters(1.0)
@@ -216,6 +223,7 @@ public record EstimatorConfig(
         .field("cameraTurnStdDevDegrees", cameraTurnStdDevDegrees, nonNegative())
         .field("cameraShiftStdDevMeters", cameraShiftStdDevMeters, nonNegative())
         .field("cameraShiftStdDevDegrees", cameraShiftStdDevDegrees, nonNegative())
+        .field("cameraWatchMeasurements", cameraWatchMeasurements, atLeast(20))
         .field("tagPlacementStdDevMeters", tagPlacementStdDevMeters, nonNegative())
         .field("cameraShiftCorrelationMeters", cameraShiftCorrelationMeters, positive())
         .field("cameraShiftCorrelationDegrees", cameraShiftCorrelationDegrees, positive())

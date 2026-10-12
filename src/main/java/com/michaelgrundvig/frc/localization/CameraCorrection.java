@@ -112,6 +112,19 @@ final class CameraCorrection {
    */
   private final double[] measurementWithConsidered;
 
+  /**
+   * How much a doubt about the camera's mount has added to its turn's variance and to its shift's,
+   * beyond the usual: zero for a camera not in doubt.
+   */
+  private double doubtedTurnVariance;
+
+  private double doubtedShiftVariance;
+
+  /** S as it would be were the camera not in doubt, for the gate's test. */
+  private final double[] undoubtedCovariance = new double[MeasurementLayout.CELLS];
+
+  private final double[] undoubtedCovarianceInverse = new double[MeasurementLayout.CELLS];
+
   /** How many camera innovations the filter has worked out: the latest one's stamp. */
   private long innovations;
 
@@ -160,6 +173,9 @@ final class CameraCorrection {
    *     heading offset
    * @param camera the camera's place, or {@link ConsideredErrors#NO_PLACE}
    * @param tagPlaces each of its tags' place, or {@link ConsideredErrors#NO_PLACE}
+   * @param knownMissX how far the camera is known to put this measurement off along the field's x,
+   *     in meters, which is taken off its position
+   * @param knownMissY and along y
    * @return the innovation, or null when the measurement cannot be compared with the estimate at
    *     all: its uncertainty and the estimate's together leave no spread to measure a distance in
    */
@@ -169,11 +185,15 @@ final class CameraCorrection {
       double y,
       double headingThen,
       int camera,
-      int[] tagPlaces) {
+      int[] tagPlaces,
+      double knownMissX,
+      double knownMissY) {
     PoseCovariance noise = measurement.covariance();
     rowCount = noise.hasHeading() ? POSE_ROWS : POSITION_ROWS;
     describeWhatItSees(measurement, headingThen, camera, tagPlaces);
     subtractThePrediction(measurement, x, y, headingThen);
+    innovation[X] -= knownMissX;
+    innovation[Y] -= knownMissY;
     covarianceOfStateWithMeasurement();
     covarianceOfInnovation(noise);
 
@@ -206,6 +226,23 @@ final class CameraCorrection {
       innovationCovarianceInverse[Y_WITH_Y] = sxx / determinant;
     }
     workOutGain();
+    boolean cameraIsInDoubt = doubtedTurnVariance > 0 || doubtedShiftVariance > 0;
+    if (cameraIsInDoubt) {
+      // The gate tests the measurement as an undoubted camera's: a doubt makes a camera count for
+      // less, and must not also let through what the camera would otherwise be refused for.
+      takeTheDoubtOut(measurement);
+      double undoubtedPosition = positionChiSquaredOf(undoubtedCovariance);
+      if (!Double.isNaN(undoubtedPosition)) {
+        positionChiSquared = undoubtedPosition;
+        chiSquared = undoubtedPosition;
+        boolean invertible =
+            rowCount == POSE_ROWS
+                && Matrices.invert3(undoubtedCovariance, undoubtedCovarianceInverse);
+        if (invertible) {
+          chiSquared = Matrices.quadratic3(undoubtedCovarianceInverse, innovation);
+        }
+      }
+    }
     return new PoseFilter.Innovation(
         innovation[X],
         innovation[Y],
@@ -214,6 +251,59 @@ final class CameraCorrection {
         chiSquared,
         positionChiSquared,
         ++innovations);
+  }
+
+  /**
+   * Fills in S as it would be were the camera not in doubt. A doubt adds to the camera's turn's
+   * variance and to its shift's, and each adds to S its variance times how much two rows see of it.
+   * The turn is seen by (-ly, lx, 1), with (lx, ly) the lever. The shift's two errors, along the
+   * robot's forward and its left, are seen by the position's rows through a rotation, so together
+   * they add their variance to each position row's own cell and nothing between them.
+   */
+  private void takeTheDoubtOut(VisionMeasurement measurement) {
+    double turnSeenByX = -measurement.lever().robotToTags().getY();
+    double turnSeenByY = measurement.lever().robotToTags().getX();
+    System.arraycopy(innovationCovariance, 0, undoubtedCovariance, 0, MeasurementLayout.CELLS);
+    for (int rowA = 0; rowA < rowCount; rowA++) {
+      double seenByRowA = turnSeenBy(rowA, turnSeenByX, turnSeenByY);
+      for (int rowB = 0; rowB < rowCount; rowB++) {
+        double seenByRowB = turnSeenBy(rowB, turnSeenByX, turnSeenByY);
+        undoubtedCovariance[between(rowA, rowB)] -= doubtedTurnVariance * seenByRowA * seenByRowB;
+      }
+    }
+    undoubtedCovariance[X_WITH_X] -= doubtedShiftVariance;
+    undoubtedCovariance[Y_WITH_Y] -= doubtedShiftVariance;
+  }
+
+  /** How much a row of the measurement sees of the camera's turn: x, y, then the heading. */
+  private static double turnSeenBy(int row, double seenByX, double seenByY) {
+    if (row == X) {
+      return seenByX;
+    }
+    return row == Y ? seenByY : 1;
+  }
+
+  /**
+   * The position's own chi-squared for a covariance of the innovation: d^T S^-1 d for the 2 by 2
+   * position block of S, with the inverse of a 2 by 2 written out: [a b; b c]^-1 = [c -b; -b a] /
+   * (a c - b²).
+   *
+   * @return NaN where the block leaves no spread to measure a distance in
+   */
+  private double positionChiSquaredOf(double[] innovationCovariance) {
+    double sxx = innovationCovariance[X_WITH_X];
+    double sxy = innovationCovariance[X_WITH_Y];
+    double syy = innovationCovariance[Y_WITH_Y];
+    double determinant = sxx * syy - sxy * sxy;
+    // Written so a determinant that is not a number counts as degenerate too.
+    boolean positionHasSpread = determinant > 0;
+    if (!positionHasSpread) {
+      return Double.NaN;
+    }
+    return (syy * innovation[X] * innovation[X]
+            - 2 * sxy * innovation[X] * innovation[Y]
+            + sxx * innovation[Y] * innovation[Y])
+        / determinant;
   }
 
   /**
@@ -266,6 +356,8 @@ final class CameraCorrection {
       turnVariance = cameraTurnVariance[camera];
       shiftVariance = cameraShiftVariance[camera];
     }
+    doubtedTurnVariance = Math.max(0, turnVariance - usualCameraTurnVariance);
+    doubtedShiftVariance = Math.max(0, shiftVariance - usualCameraShiftVariance);
     double cos = Math.cos(headingThen);
     double sin = Math.sin(headingThen);
     shared.clear();

@@ -133,7 +133,9 @@ final class PoseFilter {
    * @param withHeading whether the measurement has a heading of its own
    * @param headingRadians the heading's innovation; NaN for a measurement without a heading
    * @param chiSquared the whole innovation's squared distance from zero, measured in its own
-   *     uncertainty (its squared Mahalanobis distance): what the estimator's gate tests
+   *     uncertainty (its squared Mahalanobis distance): what the estimator's gate tests. For a
+   *     camera whose mount is in doubt, that uncertainty is taken as an undoubted camera's would
+   *     be: the doubt makes the measurement count for less, and never passes one it would fail
    * @param positionChiSquared the same for the position alone
    * @param stamp which of the filter's innovations this is. {@link #correct(Innovation)} applies
    *     only the latest, because the filter holds the working of only one at a time
@@ -363,8 +365,15 @@ final class PoseFilter {
    * proportion. Otherwise the estimate would depend on the error more than an error that small
    * allows, and the covariance of the estimate and the error together would no longer be one any
    * real errors could have (it would not be positive semidefinite).
+   *
+   * @return whether either variance changed
    */
-  void setCameraVariances(int camera, double turnVariance, double shiftVariance) {
+  boolean setCameraVariances(int camera, double turnVariance, double shiftVariance) {
+    boolean changes =
+        turnVariance != cameraTurnVariance[camera] || shiftVariance != cameraShiftVariance[camera];
+    if (!changes) {
+      return false;
+    }
     shrinkDependence(ConsideredErrors.cameraTurn(camera), turnVariance, cameraTurnVariance[camera]);
     shrinkDependence(
         ConsideredErrors.cameraShiftForward(camera), shiftVariance, cameraShiftVariance[camera]);
@@ -372,6 +381,7 @@ final class PoseFilter {
         ConsideredErrors.cameraShiftLeft(camera), shiftVariance, cameraShiftVariance[camera]);
     cameraTurnVariance[camera] = turnVariance;
     cameraShiftVariance[camera] = shiftVariance;
+    return true;
   }
 
   /**
@@ -569,8 +579,27 @@ final class PoseFilter {
    */
   @Nullable Innovation innovation(
       VisionMeasurement measurement, double yawThen, int camera, int[] tagPlaces) {
+    return innovation(measurement, yawThen, camera, tagPlaces, 0, 0);
+  }
+
+  /**
+   * The same, for a measurement whose camera is known to put its positions off: the known miss is
+   * taken off the measurement's position before it is compared.
+   *
+   * @param knownMissX how far the camera is known to put this measurement off along the field's x,
+   *     in meters ({@link CameraWatch})
+   * @param knownMissY and along y
+   */
+  @Nullable Innovation innovation(
+      VisionMeasurement measurement,
+      double yawThen,
+      int camera,
+      int[] tagPlaces,
+      double knownMissX,
+      double knownMissY) {
     double headingThen = yawThen + headingOffset;
-    return correction.compare(measurement, x, y, headingThen, camera, tagPlaces);
+    return correction.compare(
+        measurement, x, y, headingThen, camera, tagPlaces, knownMissX, knownMissY);
   }
 
   /**
