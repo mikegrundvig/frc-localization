@@ -116,7 +116,7 @@ class PoseFilterMonteCarloTest {
               + TRANSLATION_PER_METER * TRANSLATION_PER_METER * Math.abs(forward);
       double headingNoise = HEADING_PER_RADIAN * HEADING_PER_RADIAN * Math.abs(read);
       double turned = read + Math.sqrt(headingNoise) * random.nextGaussian();
-      filter.predict(yaw, turned, forward, 0, positionNoise, headingNoise, YawSource.GYRO);
+      filter.predict(yaw, turned, forward, 0, 0, positionNoise, headingNoise, YawSource.GYRO);
       yaw += turned;
       // The wheels' travel, along the true heading: off by the odometry's own error.
       x += Math.cos(heading) * forward + Math.sqrt(positionNoise) * random.nextGaussian();

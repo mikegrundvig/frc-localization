@@ -35,8 +35,22 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     its wheels can't see, in meters after one second; the variance grows with time
  * @param headingDriftDegreesPerMinute how far the gyro's heading may drift in a minute
  * @param headingStdDevDegreesPerTurn how far the gyro's heading may be off after a full turn: its
- *     scale error, the same in every turn, so five turns are five times as far off (the estimator
- *     considers it, but never corrects it: the gyro-scale procedure measures it)
+ *     scale error, the same in every turn, so five turns are five times as far off. It is how
+ *     unsure the estimator is of the gyro's scale before the cameras have said anything of it; the
+ *     gyro-scale procedure measures the scale itself
+ * @param gyroErrors whether the cameras may correct the gyro's scale and its drift as the robot
+ *     drives, or the estimator only carries their doubt
+ * @param gyroScaleWanderPercentPerMinute how far the gyro's scale may wander in a minute, in
+ *     percent, so that an estimate of it never grows too sure to follow it: a MEMS gyro's scale
+ *     moves a few hundredths of a percent for each degree Celsius its part warms, and a robot's
+ *     electronics warm a degree or so a minute while it plays. It counts only where the gyro's
+ *     errors are estimated.
+ * @param gyroDriftStdDevDegreesPerMinute how fast the gyro may drift steadily, the same every
+ *     second, before the cameras have said anything of it: what its calibration at rest left, or a
+ *     robot that was moved while it calibrated. It counts only where the gyro's errors are
+ *     estimated; {@code headingDriftDegreesPerMinute} is the drift that does not repeat.
+ * @param gyroDriftWanderDegreesPerMinute how far that steady drift may change in a minute, in
+ *     degrees a minute, as the part warms
  * @param backupHeadingStdDevDegreesPerTurn the same for the backup IMU, while it turns odometry in
  *     the gyro's place: its own scale error, the same in every turn it makes, and unrelated to the
  *     gyro's (the gyro-scale procedure calibrates the gyro alone)
@@ -107,6 +121,10 @@ public record EstimatorConfig(
     double handlingStdDevPerSqrtSecond,
     double headingDriftDegreesPerMinute,
     double headingStdDevDegreesPerTurn,
+    GyroErrors gyroErrors,
+    double gyroScaleWanderPercentPerMinute,
+    double gyroDriftStdDevDegreesPerMinute,
+    double gyroDriftWanderDegreesPerMinute,
     double backupHeadingStdDevDegreesPerTurn,
     double headingNoiseDegreesPerTurn,
     double wheelHeadingStdDevDegreesPerTurn,
@@ -144,7 +162,11 @@ public record EstimatorConfig(
           .collisionWindowSeconds(0.25)
           .handlingStdDevPerSqrtSecond(0.02)
           .headingDriftDegreesPerMinute(0.5)
-          .headingStdDevDegreesPerTurn(1.0)
+          .headingStdDevDegreesPerTurn(3.6)
+          .gyroErrors(GyroErrors.ESTIMATED)
+          .gyroScaleWanderPercentPerMinute(0.02)
+          .gyroDriftStdDevDegreesPerMinute(5.0)
+          .gyroDriftWanderDegreesPerMinute(0.1)
           .backupHeadingStdDevDegreesPerTurn(2.0)
           .headingNoiseDegreesPerTurn(0.1)
           .wheelHeadingStdDevDegreesPerTurn(10)
@@ -152,7 +174,7 @@ public record EstimatorConfig(
           .cameraShiftStdDevMeters(0.005)
           .cameraShiftStdDevDegrees(2.0)
           .tagPlacementStdDevMeters(0.01)
-          .headingCorrection(HeadingCorrection.HEADING_MEASUREMENTS)
+          .headingCorrection(HeadingCorrection.EVERY_FIX)
           .cameraShiftCorrelationMeters(1.0)
           .cameraShiftCorrelationDegrees(45)
           .historySeconds(1.5)
@@ -184,6 +206,9 @@ public record EstimatorConfig(
         .field("handlingStdDevPerSqrtSecond", handlingStdDevPerSqrtSecond, nonNegative())
         .field("headingDriftDegreesPerMinute", headingDriftDegreesPerMinute, nonNegative())
         .field("headingStdDevDegreesPerTurn", headingStdDevDegreesPerTurn, nonNegative())
+        .field("gyroScaleWanderPercentPerMinute", gyroScaleWanderPercentPerMinute, nonNegative())
+        .field("gyroDriftStdDevDegreesPerMinute", gyroDriftStdDevDegreesPerMinute, nonNegative())
+        .field("gyroDriftWanderDegreesPerMinute", gyroDriftWanderDegreesPerMinute, nonNegative())
         .field(
             "backupHeadingStdDevDegreesPerTurn", backupHeadingStdDevDegreesPerTurn, nonNegative())
         .field("headingNoiseDegreesPerTurn", headingNoiseDegreesPerTurn, nonNegative())
@@ -252,6 +277,30 @@ public record EstimatorConfig(
      * before choosing it (docs/testing.md, docs/characterization.md).
      */
     EVERY_FIX
+  }
+
+  /**
+   * What the estimator does about the gyro's own errors: reading its turns a little large or small
+   * (its scale), and turning a little every second while the robot stands still (its drift).
+   */
+  public enum GyroErrors {
+    /**
+     * It carries the scale's doubt ({@code headingStdDevDegreesPerTurn}) and never corrects it: the
+     * heading grows less sure with every turn, by the same error each time, until a camera corrects
+     * the heading itself. Drift is noise that grows the heading's doubt with time ({@code
+     * headingDriftDegreesPerMinute}). Right for a gyro whose scale was measured and set, on a robot
+     * whose cameras the team would rather not have touch the gyro.
+     */
+    CONSIDERED,
+    /**
+     * It estimates both: whatever corrects the heading also says, by how far the heading was off
+     * after how much turning and how much time, how the gyro misreads its turns and how fast it
+     * drifts, and every step after is corrected by that. A gyro a few percent off, or drifting some
+     * degrees a minute, is followed within a few turns or seconds, and its heading then stays right
+     * through a turn and through a stretch without tags. Both start from no error, as unsure as
+     * {@code headingStdDevDegreesPerTurn} and {@code gyroDriftStdDevDegreesPerMinute} say.
+     */
+    ESTIMATED
   }
 
   /** Starts building estimator settings, one named value at a time. */

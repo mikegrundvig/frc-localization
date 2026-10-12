@@ -17,10 +17,13 @@ import org.wpilib.math.util.MathUtil;
 /**
  * Where the robot is: odometry, corrected by camera measurements, with the gyro owning heading.
  *
- * <p>The state is the robot's position and a heading offset: the field heading is the gyro's
- * reading plus the offset, so the gyro keeps all short-term authority over heading, and cameras
- * only correct its slow drift. A 3x3 covariance holds the uncertainty of all three and how they
- * relate: an unsure heading makes every meter driven add position uncertainty sideways.
+ * <p>The state is the robot's position, a heading offset, and the gyro's two errors, its scale and
+ * its drift: the field heading is the gyro's reading plus the offset, so the gyro keeps all
+ * short-term authority over heading, and cameras correct what it gets wrong, the share of every
+ * turn its scale misreads and what it drifts each second. A covariance holds the uncertainty of all
+ * of them and how they relate: an unsure heading makes every meter driven add position uncertainty
+ * sideways, an unsure scale makes every turn add heading uncertainty, and an unsure drift every
+ * second.
  *
  * <p><b>Odometry.</b> Each odometry step predicts: the wheels' motion, along the arc the gyro
  * turned through, moves the position, and the uncertainty grows with the distance driven, the
@@ -64,6 +67,7 @@ public final class PoseEstimator {
 
   private static final double RADIANS_PER_TURN = 2 * Math.PI;
   private static final double SECONDS_PER_MINUTE = 60;
+  private static final double PERCENT = 100;
 
   private final EstimatorConfig config;
   private final Predicate<Translation2d> onField;
@@ -226,12 +230,34 @@ public final class PoseEstimator {
                 config.cameraShiftCorrelationMeters(),
                 Math.toRadians(config.cameraShiftCorrelationDegrees())),
             places.tagCount(),
-            config.headingCorrection() == EstimatorConfig.HeadingCorrection.EVERY_FIX);
+            config.headingCorrection() == EstimatorConfig.HeadingCorrection.EVERY_FIX,
+            config.gyroErrors() == EstimatorConfig.GyroErrors.ESTIMATED
+                ? PoseFilter.GyroErrors.ESTIMATED
+                : PoseFilter.GyroErrors.CONSIDERED,
+            gyroDoubt(config));
     int stepsInTheHistory = (int) Math.ceil(config.historySeconds() * MOST_STEPS_PER_SECOND) + 1;
     history =
         new OdometryHistory(
             Math.max(FEWEST_STEPS_KEPT, stepsInTheHistory), filter.uncertaintyLength());
     filter.set(initial, yaw);
+  }
+
+  /**
+   * The configuration's doubts about the gyro in the filter's units. A wander "per minute" is how
+   * far the value may have moved after a minute, and its variance grows with time, so after one
+   * second it is that over the square root of 60.
+   */
+  private static PoseFilter.GyroDoubt gyroDoubt(EstimatorConfig config) {
+    double sqrtSecondsPerMinute = Math.sqrt(SECONDS_PER_MINUTE);
+    double driftRadiansPerSecond =
+        Math.toRadians(config.gyroDriftStdDevDegreesPerMinute()) / SECONDS_PER_MINUTE;
+    double scaleWander = config.gyroScaleWanderPercentPerMinute() / PERCENT / sqrtSecondsPerMinute;
+    double driftWanderRadiansPerSecond =
+        Math.toRadians(config.gyroDriftWanderDegreesPerMinute())
+            / SECONDS_PER_MINUTE
+            / sqrtSecondsPerMinute;
+    return new PoseFilter.GyroDoubt(
+        driftRadiansPerSecond, scaleWander, driftWanderRadiansPerSecond);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -359,6 +385,8 @@ public final class PoseEstimator {
    *   <li>to the heading, a variance for each second passed (the gyro's drift) and for each radian
    *       turned (the noise of whatever turned the step).
    * </ul>
+   *
+   * <p>The filter itself adds what the gyro's scale and drift may have wandered over the time.
    */
   private void predictThrough(int step, double fromFraction, double toFraction) {
     double fraction = toFraction - fromFraction;
@@ -386,6 +414,7 @@ public final class PoseEstimator {
         fraction * stepTurn,
         fraction * stepForward,
         fraction * stepLeft,
+        fraction * stepSeconds,
         fraction * stepPositionVariance,
         fraction * stepHeadingVariance,
         turnedBy);
@@ -851,7 +880,9 @@ public final class PoseEstimator {
     }
     long newestTime = history.newestTime();
     if (timestampNanos < newestTime) {
-      return Optional.of(history.poseAt(timestampNanos, filter.headingOffset()));
+      return Optional.of(
+          history.poseAt(
+              timestampNanos, filter.headingOffset(), filter.gyroScale(), filter.gyroDrift()));
     }
     // At the newest step or a little after it, the robot is taken to be where it is now.
     boolean tooFarAhead = timestampNanos > newestTime + futureToleranceNanos;
@@ -859,6 +890,43 @@ public final class PoseEstimator {
       return Optional.empty();
     }
     return Optional.of(pose());
+  }
+
+  /**
+   * The gyro's scale error as the estimator has it, in percent: 3 for a gyro it takes to read 3%
+   * more turn than the robot makes. Zero until the cameras have said anything of it, and always
+   * zero when the gyro's errors are only considered ({@link
+   * EstimatorConfig.GyroErrors#CONSIDERED}).
+   *
+   * <p>The filter keeps the scale as the heading each radian of the gyro's turn adds, s. A gyro
+   * that reads (1 + e) times the true turn adds -e / (1 + e) of each radian it reads, so e is -s /
+   * (1 + s).
+   */
+  public double gyroScalePercent() {
+    double addedPerRadian = filter.gyroScale();
+    return -addedPerRadian / (1 + addedPerRadian) * PERCENT;
+  }
+
+  /** How sure that is, as a standard deviation, in percent. */
+  public double gyroScaleStdDevPercent() {
+    return filter.gyroScaleStdDev() * PERCENT;
+  }
+
+  /**
+   * The gyro's steady drift as the estimator has it, in degrees a minute, counterclockwise: 10 for
+   * a gyro it takes to turn 10° a minute while the robot stands still. Zero until the cameras have
+   * said anything of it, and always zero when the gyro's errors are only considered.
+   *
+   * <p>The filter keeps the drift as the heading each second adds to undo it, so the gyro's own
+   * drift is the opposite.
+   */
+  public double gyroDriftDegreesPerMinute() {
+    return -Math.toDegrees(filter.gyroDrift()) * SECONDS_PER_MINUTE;
+  }
+
+  /** How sure that is, as a standard deviation, in degrees a minute. */
+  public double gyroDriftStdDevDegreesPerMinute() {
+    return Math.toDegrees(filter.gyroDriftStdDev()) * SECONDS_PER_MINUTE;
   }
 
   /** The current pose: cheap, for driving every loop. */

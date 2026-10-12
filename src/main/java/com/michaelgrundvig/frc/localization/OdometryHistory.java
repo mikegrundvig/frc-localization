@@ -79,11 +79,28 @@ final class OdometryHistory {
   /** The unwrapped yaw as each step ended, in radians. */
   private final double[] yawAfterRadians;
 
+  /**
+   * How far the gyro had turned the robot, in all, as each step ended, in radians: the sum of the
+   * turns of the steps the gyro turned, counted from when the history started. The gyro's scale
+   * error misreads a share of exactly this, so the difference between two steps' sums is what the
+   * scale has to say about the heading between them.
+   */
+  private final double[] gyroTurnAfterRadians;
+
+  /**
+   * For how long the gyro had turned the robot, in all, as each step ended, in seconds: the sum of
+   * the durations of the steps the gyro turned. The gyro's drift adds to the heading over exactly
+   * this.
+   */
+  private final double[] gyroSecondsAfter;
+
   // The filter's state once each step had been applied. A replay rewrites these.
 
   private final double[] filterXAfter;
   private final double[] filterYAfter;
   private final double[] filterHeadingOffsetAfter;
+  private final double[] filterGyroScaleAfter;
+  private final double[] filterGyroDriftAfter;
 
   /**
    * The filter's uncertainty after each step, one step after another: for each slot, the {@link
@@ -108,9 +125,13 @@ final class OdometryHistory {
     addedPositionVariance = new double[capacity];
     turnedBy = new YawSource[capacity];
     yawAfterRadians = new double[capacity];
+    gyroTurnAfterRadians = new double[capacity];
+    gyroSecondsAfter = new double[capacity];
     filterXAfter = new double[capacity];
     filterYAfter = new double[capacity];
     filterHeadingOffsetAfter = new double[capacity];
+    filterGyroScaleAfter = new double[capacity];
+    filterGyroDriftAfter = new double[capacity];
     filterUncertaintyAfter = new double[capacity * uncertaintyLength];
   }
 
@@ -124,6 +145,8 @@ final class OdometryHistory {
     endTimeNanos[oldestSlot] = timestampNanos;
     turnedBy[oldestSlot] = source;
     yawAfterRadians[oldestSlot] = yawRadians;
+    gyroTurnAfterRadians[oldestSlot] = 0;
+    gyroSecondsAfter[oldestSlot] = 0;
   }
 
   /**
@@ -150,6 +173,11 @@ final class OdometryHistory {
     if (stepCount == capacity) {
       dropOldestStep();
     }
+    int previous = slotOf(newestStep());
+    boolean gyroTurnedIt = source == YawSource.GYRO;
+    double gyroTurn = gyroTurnedIt ? yawRadians - yawAfterRadians[previous] : 0;
+    double gyroSeconds =
+        gyroTurnedIt ? Timestamps.toSeconds(timestampNanos - endTimeNanos[previous]) : 0;
     stepCount++;
     int slot = slotOf(newestStep());
     endTimeNanos[slot] = timestampNanos;
@@ -159,6 +187,8 @@ final class OdometryHistory {
     addedPositionVariance[slot] = positionVariance;
     turnedBy[slot] = source;
     yawAfterRadians[slot] = yawRadians;
+    gyroTurnAfterRadians[slot] = gyroTurnAfterRadians[previous] + gyroTurn;
+    gyroSecondsAfter[slot] = gyroSecondsAfter[previous] + gyroSeconds;
     return newestStep();
   }
 
@@ -245,6 +275,8 @@ final class OdometryHistory {
     filterXAfter[slot] = filter.x();
     filterYAfter[slot] = filter.y();
     filterHeadingOffsetAfter[slot] = filter.headingOffset();
+    filterGyroScaleAfter[slot] = filter.gyroScale();
+    filterGyroDriftAfter[slot] = filter.gyroDrift();
     filter.copyUncertaintyTo(filterUncertaintyAfter, slot * uncertaintyLength);
   }
 
@@ -255,6 +287,8 @@ final class OdometryHistory {
         filterXAfter[slot],
         filterYAfter[slot],
         filterHeadingOffsetAfter[slot],
+        filterGyroScaleAfter[slot],
+        filterGyroDriftAfter[slot],
         filterUncertaintyAfter,
         slot * uncertaintyLength);
   }
@@ -282,10 +316,20 @@ final class OdometryHistory {
    * states have it. The position is taken along a straight line between the states either side of
    * the moment, and the yaw likewise.
    *
-   * @param headingOffsetRadians the filter's heading offset now, which is added to the yaw then:
-   *     the heading is given as the estimate understands it today
+   * <p>The heading then is the yaw then plus the heading offset then. The offset is given as the
+   * estimate understands it today: today's offset, less what the gyro's errors have added to it
+   * since, which is the scale times how far the gyro has turned the robot from that moment to now,
+   * and the drift times for how long.
+   *
+   * @param headingOffsetRadians the filter's heading offset now
+   * @param gyroScale the filter's estimate of the gyro's scale error now
+   * @param gyroDrift and of its drift
    */
-  Pose2d poseAt(long timestampNanos, double headingOffsetRadians) {
+  Pose2d poseAt(
+      long timestampNanos, double headingOffsetRadians, double gyroScale, double gyroDrift) {
+    int newest = slotOf(newestStep());
+    double gyroTurnNow = gyroTurnAfterRadians[newest];
+    double gyroSecondsNow = gyroSecondsAfter[newest];
     // The step the moment falls in is the earliest one whose predecessor ended before the moment.
     int step = newestStep();
     while (step > OLDEST_STEP && endTime(step - 1) >= timestampNanos) {
@@ -293,20 +337,33 @@ final class OdometryHistory {
     }
     if (step == OLDEST_STEP) {
       int slot = slotOf(OLDEST_STEP);
+      double offsetThen =
+          headingOffsetRadians
+              - gyroScale * (gyroTurnNow - gyroTurnAfterRadians[slot])
+              - gyroDrift * (gyroSecondsNow - gyroSecondsAfter[slot]);
       return new Pose2d(
           filterXAfter[slot],
           filterYAfter[slot],
-          new Rotation2d(yawAfterRadians[slot] + headingOffsetRadians));
+          new Rotation2d(yawAfterRadians[slot] + offsetThen));
     }
     int before = slotOf(step - 1);
     int after = slotOf(step);
     double fraction =
         (double) (timestampNanos - endTimeNanos[before])
             / (endTimeNanos[after] - endTimeNanos[before]);
+    double gyroTurnThen =
+        gyroTurnAfterRadians[before]
+            + fraction * (gyroTurnAfterRadians[after] - gyroTurnAfterRadians[before]);
+    double gyroSecondsThen =
+        gyroSecondsAfter[before] + fraction * (gyroSecondsAfter[after] - gyroSecondsAfter[before]);
+    double offsetThen =
+        headingOffsetRadians
+            - gyroScale * (gyroTurnNow - gyroTurnThen)
+            - gyroDrift * (gyroSecondsNow - gyroSecondsThen);
     return new Pose2d(
         filterXAfter[before] + fraction * (filterXAfter[after] - filterXAfter[before]),
         filterYAfter[before] + fraction * (filterYAfter[after] - filterYAfter[before]),
-        new Rotation2d(yawPartWayThrough(step, fraction) + headingOffsetRadians));
+        new Rotation2d(yawPartWayThrough(step, fraction) + offsetThen));
   }
 
   /**
@@ -314,7 +371,9 @@ final class OdometryHistory {
    * newest. Each step's travel is turned onto the field by the heading the robot had as the step
    * began, and the total is divided by the time those steps took.
    *
-   * @param headingOffsetRadians the filter's heading offset, which makes a yaw a field heading
+   * @param headingOffsetRadians the filter's heading offset, which makes a yaw a field heading.
+   *     Today's offset is used for every step of the window: over a tenth of a second the gyro's
+   *     scale changes it by too little to matter to a velocity's direction.
    */
   Motion motionOver(long windowNanos, double headingOffsetRadians) {
     long newestTime = newestTime();

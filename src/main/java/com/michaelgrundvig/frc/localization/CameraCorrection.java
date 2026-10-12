@@ -1,21 +1,20 @@
 package com.michaelgrundvig.frc.localization;
 
+import static com.michaelgrundvig.frc.localization.MeasurementLayout.HEADING_WITH_HEADING;
+import static com.michaelgrundvig.frc.localization.MeasurementLayout.X_WITH_X;
+import static com.michaelgrundvig.frc.localization.MeasurementLayout.X_WITH_Y;
+import static com.michaelgrundvig.frc.localization.MeasurementLayout.Y_WITH_X;
+import static com.michaelgrundvig.frc.localization.MeasurementLayout.Y_WITH_Y;
+import static com.michaelgrundvig.frc.localization.MeasurementLayout.between;
 import static com.michaelgrundvig.frc.localization.StateLayout.CELLS;
+import static com.michaelgrundvig.frc.localization.StateLayout.GYRO_DRIFT;
+import static com.michaelgrundvig.frc.localization.StateLayout.GYRO_SCALE;
 import static com.michaelgrundvig.frc.localization.StateLayout.HEADING;
-import static com.michaelgrundvig.frc.localization.StateLayout.HH;
-import static com.michaelgrundvig.frc.localization.StateLayout.HX;
-import static com.michaelgrundvig.frc.localization.StateLayout.HY;
 import static com.michaelgrundvig.frc.localization.StateLayout.POSE_ROWS;
 import static com.michaelgrundvig.frc.localization.StateLayout.POSITION_ROWS;
 import static com.michaelgrundvig.frc.localization.StateLayout.STATES;
 import static com.michaelgrundvig.frc.localization.StateLayout.X;
-import static com.michaelgrundvig.frc.localization.StateLayout.XH;
-import static com.michaelgrundvig.frc.localization.StateLayout.XX;
-import static com.michaelgrundvig.frc.localization.StateLayout.XY;
 import static com.michaelgrundvig.frc.localization.StateLayout.Y;
-import static com.michaelgrundvig.frc.localization.StateLayout.YH;
-import static com.michaelgrundvig.frc.localization.StateLayout.YX;
-import static com.michaelgrundvig.frc.localization.StateLayout.YY;
 import static com.michaelgrundvig.frc.localization.StateLayout.cell;
 
 import java.util.List;
@@ -43,6 +42,9 @@ final class CameraCorrection {
 
   private final boolean positionFixesCorrectHeading;
 
+  /** Whether a measurement that corrects the heading corrects the gyro's errors with it. */
+  private final boolean estimatesGyroErrors;
+
   /** What a camera's turn and shift on its mount are taken to be for a camera without a place. */
   private final double usualCameraTurnVariance;
 
@@ -52,10 +54,10 @@ final class CameraCorrection {
 
   // The filter's own arrays, shared with it.
 
-  /** P, the state's covariance: 3 by 3, row by row. */
+  /** P, the state's covariance: 5 by 5, row by row. */
   private final double[] covariance;
 
-  /** C, the state's cross-covariance with the considered errors: 3 rows of consideredCount. */
+  /** C, the state's cross-covariance with the considered errors: 5 rows of consideredCount. */
   private final double[] crossCovariance;
 
   /** Each camera's turn's variance, and its shift's, by the camera's place. */
@@ -74,7 +76,9 @@ final class CameraCorrection {
 
   /**
    * H, the measurement's Jacobian with respect to the state: one row for each row of the
-   * measurement, one column for each of x, y and the heading offset.
+   * measurement, one column for each of x, y, the heading offset and the gyro's scale and drift. No
+   * measurement sees the gyro's errors themselves, so their columns are zero. A measurement tells
+   * of them only through how the heading's error has come to depend on them.
    */
   private final double[] stateSeenBy = new double[CELLS];
 
@@ -83,17 +87,20 @@ final class CameraCorrection {
 
   /**
    * The covariance of the state's errors with the measurement's: P H^T, plus what reaches the
-   * measurement through the considered errors. 3 rows for the state, a column for each row of the
-   * measurement.
+   * measurement through the considered errors. a row for each value of the state, a column for each
+   * row of the measurement.
    */
   private final double[] stateWithMeasurement = new double[CELLS];
 
-  /** S, the innovation's covariance: rowCount by rowCount, in the top left of a 3 by 3. */
-  private final double[] innovationCovariance = new double[CELLS];
+  /**
+   * S, the innovation's covariance: rowCount by rowCount, in the top left of a 3 by 3 ({@link
+   * MeasurementLayout}).
+   */
+  private final double[] innovationCovariance = new double[MeasurementLayout.CELLS];
 
-  private final double[] innovationCovarianceInverse = new double[CELLS];
+  private final double[] innovationCovarianceInverse = new double[MeasurementLayout.CELLS];
 
-  /** K, the gain: 3 rows for the state, a column for each row of the measurement. */
+  /** K, the gain: a row for each value of the state, a column for each row of the measurement. */
   private final double[] gain = new double[CELLS];
 
   /** K S, used once in the covariance's update. */
@@ -112,6 +119,8 @@ final class CameraCorrection {
    * @param sizes how unsure the filter is of the errors it considers
    * @param tags how many tags' placements have columns of their own
    * @param positionFixesCorrectHeading whether a position fix also corrects the heading
+   * @param estimatesGyroErrors whether a measurement that corrects the heading corrects the gyro's
+   *     scale and drift too
    * @param covariance the filter's P, which this corrects in place
    * @param crossCovariance the filter's C, which this corrects in place
    * @param cameraTurnVariance the filter's variance of each camera's turn, which this only reads
@@ -121,6 +130,7 @@ final class CameraCorrection {
       PoseFilter.Considered sizes,
       int tags,
       boolean positionFixesCorrectHeading,
+      boolean estimatesGyroErrors,
       double[] covariance,
       double[] crossCovariance,
       double[] cameraTurnVariance,
@@ -128,6 +138,7 @@ final class CameraCorrection {
     tagCount = tags;
     consideredCount = ConsideredErrors.count(tags);
     this.positionFixesCorrectHeading = positionFixesCorrectHeading;
+    this.estimatesGyroErrors = estimatesGyroErrors;
     usualCameraTurnVariance = square(sizes.cameraTurnStdDevRadians());
     usualCameraShiftVariance = square(sizes.cameraShiftStdDevMeters());
     headingsShiftVariance = square(sizes.cameraShiftStdDevRadians());
@@ -168,9 +179,9 @@ final class CameraCorrection {
 
     // The position's own chi-squared, d^T S^-1 d for the 2 by 2 position block of S, with the
     // inverse of a 2 by 2 written out: [a b; b c]^-1 = [c -b; -b a] / (a c - b²).
-    double sxx = innovationCovariance[XX];
-    double sxy = innovationCovariance[XY];
-    double syy = innovationCovariance[YY];
+    double sxx = innovationCovariance[X_WITH_X];
+    double sxy = innovationCovariance[X_WITH_Y];
+    double syy = innovationCovariance[Y_WITH_Y];
     double determinant = sxx * syy - sxy * sxy;
     // Written so a determinant that is not a number counts as degenerate too.
     boolean positionHasSpread = determinant > 0;
@@ -189,10 +200,10 @@ final class CameraCorrection {
       }
       chiSquared = Matrices.quadratic3(innovationCovarianceInverse, innovation);
     } else {
-      innovationCovarianceInverse[XX] = syy / determinant;
-      innovationCovarianceInverse[XY] = -sxy / determinant;
-      innovationCovarianceInverse[YX] = -sxy / determinant;
-      innovationCovarianceInverse[YY] = sxx / determinant;
+      innovationCovarianceInverse[X_WITH_X] = syy / determinant;
+      innovationCovarianceInverse[X_WITH_Y] = -sxy / determinant;
+      innovationCovarianceInverse[Y_WITH_X] = -sxy / determinant;
+      innovationCovarianceInverse[Y_WITH_Y] = sxx / determinant;
     }
     workOutGain();
     return new PoseFilter.Innovation(
@@ -214,9 +225,9 @@ final class CameraCorrection {
    * quarter turn. With the lever (lx, ly), H is
    *
    * <pre>
-   *   1  0  -ly
-   *   0  1   lx
-   *   0  0   1     (the heading row, used only by a measurement with a heading of its own)
+   *   1  0  -ly  0  0
+   *   0  1   lx  0  0
+   *   0  0   1   0  0     (the heading row, used only by a measurement with a heading of its own)
    * </pre>
    */
   private void describeWhatItSees(
@@ -226,12 +237,18 @@ final class CameraCorrection {
     stateSeenBy[cell(X, X)] = 1;
     stateSeenBy[cell(X, Y)] = 0;
     stateSeenBy[cell(X, HEADING)] = -leverY;
+    stateSeenBy[cell(X, GYRO_SCALE)] = 0;
+    stateSeenBy[cell(X, GYRO_DRIFT)] = 0;
     stateSeenBy[cell(Y, X)] = 0;
     stateSeenBy[cell(Y, Y)] = 1;
     stateSeenBy[cell(Y, HEADING)] = leverX;
+    stateSeenBy[cell(Y, GYRO_SCALE)] = 0;
+    stateSeenBy[cell(Y, GYRO_DRIFT)] = 0;
     stateSeenBy[cell(HEADING, X)] = 0;
     stateSeenBy[cell(HEADING, Y)] = 0;
     stateSeenBy[cell(HEADING, HEADING)] = 1;
+    stateSeenBy[cell(HEADING, GYRO_SCALE)] = 0;
+    stateSeenBy[cell(HEADING, GYRO_DRIFT)] = 0;
 
     // A camera with a place shares its errors with its other images, at their own variances. One
     // without a place has the usual variances and no columns.
@@ -314,10 +331,10 @@ final class CameraCorrection {
   private void covarianceOfStateWithMeasurement() {
     for (int state = 0; state < STATES; state++) {
       for (int row = 0; row < rowCount; row++) {
-        double sum =
-            covariance[cell(state, X)] * stateSeenBy[cell(row, X)]
-                + covariance[cell(state, Y)] * stateSeenBy[cell(row, Y)]
-                + covariance[cell(state, HEADING)] * stateSeenBy[cell(row, HEADING)];
+        double sum = 0;
+        for (int seen = 0; seen < STATES; seen++) {
+          sum += covariance[cell(state, seen)] * stateSeenBy[cell(row, seen)];
+        }
         for (int error = 0; error < shared.count(); error++) {
           int column = shared.column(error);
           if (ConsideredErrors.hasColumn(column)) {
@@ -343,34 +360,34 @@ final class CameraCorrection {
   private void covarianceOfInnovation(PoseCovariance noise) {
     for (int rowA = 0; rowA < rowCount; rowA++) {
       for (int rowB = 0; rowB < rowCount; rowB++) {
-        double sum =
-            stateSeenBy[cell(rowA, X)] * stateWithMeasurement[cell(X, rowB)]
-                + stateSeenBy[cell(rowA, Y)] * stateWithMeasurement[cell(Y, rowB)]
-                + stateSeenBy[cell(rowA, HEADING)] * stateWithMeasurement[cell(HEADING, rowB)];
+        double sum = 0;
+        for (int state = 0; state < STATES; state++) {
+          sum += stateSeenBy[cell(rowA, state)] * stateWithMeasurement[cell(state, rowB)];
+        }
         for (int error = 0; error < shared.count(); error++) {
           double seenByRowA = shared.seenBy(rowA, error);
           if (seenByRowA != 0) {
             double errorWithRowB = shared.variance(error) * shared.seenBy(rowB, error);
             int column = shared.column(error);
             if (ConsideredErrors.hasColumn(column)) {
-              errorWithRowB +=
-                  crossCovariance[cross(X, column)] * stateSeenBy[cell(rowB, X)]
-                      + crossCovariance[cross(Y, column)] * stateSeenBy[cell(rowB, Y)]
-                      + crossCovariance[cross(HEADING, column)] * stateSeenBy[cell(rowB, HEADING)];
+              for (int state = 0; state < STATES; state++) {
+                errorWithRowB +=
+                    crossCovariance[cross(state, column)] * stateSeenBy[cell(rowB, state)];
+              }
             }
             sum += seenByRowA * errorWithRowB;
           }
         }
-        innovationCovariance[cell(rowA, rowB)] = sum;
+        innovationCovariance[between(rowA, rowB)] = sum;
       }
     }
     // R, the measurement's own noise.
-    innovationCovariance[XX] += noise.xx();
-    innovationCovariance[XY] += noise.xy();
-    innovationCovariance[YX] += noise.xy();
-    innovationCovariance[YY] += noise.yy();
+    innovationCovariance[X_WITH_X] += noise.xx();
+    innovationCovariance[X_WITH_Y] += noise.xy();
+    innovationCovariance[Y_WITH_X] += noise.xy();
+    innovationCovariance[Y_WITH_Y] += noise.yy();
     if (rowCount == POSE_ROWS) {
-      innovationCovariance[HH] += noise.heading();
+      innovationCovariance[HEADING_WITH_HEADING] += noise.heading();
     }
     makeInnovationCovarianceSymmetric();
   }
@@ -379,23 +396,26 @@ final class CameraCorrection {
    * Fills in the gain, K = C S^-1, where C is the covariance of the state with the measurement.
    *
    * <p>A measurement without a heading of its own leaves the heading alone unless the filter was
-   * made to let every fix correct it: its gain for the heading offset is set to zero. That is not
+   * made to let every fix correct it: its gain for the heading offset is set to zero. The gyro's
+   * errors are corrected only by a measurement that corrects the heading, since the heading is all
+   * they show themselves in, and only if the filter was made to estimate them. A zeroed gain is not
    * the gain a Kalman filter would choose, which is why {@link #correctUncertainty} updates the
    * covariance in the form that is right for any gain.
    */
   private void workOutGain() {
     boolean leavesHeadingAlone = rowCount == POSITION_ROWS && !positionFixesCorrectHeading;
+    boolean leavesGyroErrorsAlone = leavesHeadingAlone || !estimatesGyroErrors;
     for (int state = 0; state < STATES; state++) {
+      boolean isAGyroError = state == GYRO_SCALE || state == GYRO_DRIFT;
+      boolean leftAlone =
+          (state == HEADING && leavesHeadingAlone) || (isAGyroError && leavesGyroErrorsAlone);
       for (int row = 0; row < rowCount; row++) {
         double sum = 0;
         for (int k = 0; k < rowCount; k++) {
-          sum += stateWithMeasurement[cell(state, k)] * innovationCovarianceInverse[cell(k, row)];
+          sum +=
+              stateWithMeasurement[cell(state, k)] * innovationCovarianceInverse[between(k, row)];
         }
-        if (state == HEADING && leavesHeadingAlone) {
-          gain[cell(state, row)] = 0;
-        } else {
-          gain[cell(state, row)] = sum;
-        }
+        gain[cell(state, row)] = leftAlone ? 0 : sum;
       }
     }
   }
@@ -425,7 +445,7 @@ final class CameraCorrection {
       for (int row = 0; row < rowCount; row++) {
         double sum = 0;
         for (int k = 0; k < rowCount; k++) {
-          sum += gain[cell(state, k)] * innovationCovariance[cell(k, row)];
+          sum += gain[cell(state, k)] * innovationCovariance[between(k, row)];
         }
         gainTimesInnovationCovariance[cell(state, row)] = sum;
       }
@@ -450,10 +470,11 @@ final class CameraCorrection {
     // error's own variance times how much each row sees of it.
     for (int row = 0; row < rowCount; row++) {
       for (int column = 0; column < consideredCount; column++) {
-        measurementWithConsidered[cross(row, column)] =
-            crossCovariance[cross(X, column)] * stateSeenBy[cell(row, X)]
-                + crossCovariance[cross(Y, column)] * stateSeenBy[cell(row, Y)]
-                + crossCovariance[cross(HEADING, column)] * stateSeenBy[cell(row, HEADING)];
+        double throughTheState = 0;
+        for (int state = 0; state < STATES; state++) {
+          throughTheState += crossCovariance[cross(state, column)] * stateSeenBy[cell(row, state)];
+        }
+        measurementWithConsidered[cross(row, column)] = throughTheState;
       }
       for (int error = 0; error < shared.count(); error++) {
         int column = shared.column(error);
@@ -491,19 +512,25 @@ final class CameraCorrection {
     return row * consideredCount + column;
   }
 
+  /** Sets each pair of mirrored cells of P to their mean, so that rounding cannot part them. */
   private void makeCovarianceSymmetric() {
-    covariance[XY] = covariance[YX] = (covariance[XY] + covariance[YX]) / 2;
-    covariance[XH] = covariance[HX] = (covariance[XH] + covariance[HX]) / 2;
-    covariance[YH] = covariance[HY] = (covariance[YH] + covariance[HY]) / 2;
+    for (int stateA = 0; stateA < STATES; stateA++) {
+      for (int stateB = stateA + 1; stateB < STATES; stateB++) {
+        double mean = (covariance[cell(stateA, stateB)] + covariance[cell(stateB, stateA)]) / 2;
+        covariance[cell(stateA, stateB)] = mean;
+        covariance[cell(stateB, stateA)] = mean;
+      }
+    }
   }
 
   private void makeInnovationCovarianceSymmetric() {
     for (int rowA = 0; rowA < rowCount; rowA++) {
       for (int rowB = rowA + 1; rowB < rowCount; rowB++) {
         double mean =
-            (innovationCovariance[cell(rowA, rowB)] + innovationCovariance[cell(rowB, rowA)]) / 2;
-        innovationCovariance[cell(rowA, rowB)] = mean;
-        innovationCovariance[cell(rowB, rowA)] = mean;
+            (innovationCovariance[between(rowA, rowB)] + innovationCovariance[between(rowB, rowA)])
+                / 2;
+        innovationCovariance[between(rowA, rowB)] = mean;
+        innovationCovariance[between(rowB, rowA)] = mean;
       }
     }
   }

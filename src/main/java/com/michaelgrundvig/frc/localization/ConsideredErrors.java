@@ -7,7 +7,6 @@ package com.michaelgrundvig.frc.localization;
  * errors have come to depend on it. Those are the columns of one table, in this order:
  *
  * <ol>
- *   <li>the gyro's scale;
  *   <li>the backup IMU's scale;
  *   <li>four columns for each of {@link #MAX_CAMERAS} cameras: the camera's turn on its mount, its
  *       shift on its mount along the robot's forward, the same along the robot's left, and its
@@ -19,6 +18,9 @@ package com.michaelgrundvig.frc.localization;
  * <p>A camera or a tag is known here by its <em>place</em>: a number from zero that the estimator
  * gives each camera as it first appears and each field tag at the start. One the estimator has no
  * place for is given {@link #NO_PLACE}, and has no columns.
+ *
+ * <p>The gyro's scale is not among them. It is a value of the filter's state ({@link
+ * StateLayout#GYRO_SCALE}), because the filter can estimate it.
  */
 final class ConsideredErrors {
   private ConsideredErrors() {}
@@ -32,10 +34,9 @@ final class ConsideredErrors {
   /** The column of an error the filter keeps no column for. */
   static final int NO_COLUMN = -1;
 
-  static final int GYRO_SCALE = 0;
-  static final int BACKUP_SCALE = 1;
+  static final int BACKUP_SCALE = 0;
 
-  private static final int IMU_COLUMNS = 2;
+  private static final int IMU_COLUMNS = 1;
   private static final int COLUMNS_PER_CAMERA = 4;
   private static final int COLUMNS_PER_TAG = 2;
 

@@ -190,7 +190,7 @@ class PoseFilterTest {
     double facingOneWay = filter.covariance().xStdDev();
 
     // Half a turn, the heading as sure as before; the camera now sees a tag behind, as sure.
-    filter.predict(0, Math.PI, 0, 0, 0, 0, YawSource.WHEELS);
+    filter.predict(0, Math.PI, 0, 0, 0, 0, 0, YawSource.WHEELS);
     Rotation2d around = new Rotation2d(Math.PI);
     for (int i = 0; i < 2000; i++) {
       apply(
@@ -217,7 +217,7 @@ class PoseFilterTest {
 
     // A quarter turn on the wheels (no scale error), the turn itself sure: the shift mostly
     // forgotten, e^-2 of it left.
-    filter.predict(0, Math.PI / 2, 0, 0, 0, 0, YawSource.WHEELS);
+    filter.predict(0, Math.PI / 2, 0, 0, 0, 0, 0, YawSource.WHEELS);
     for (int i = 0; i < 2000; i++) {
       apply(filter, withHeading(new Rotation2d(Math.PI / 2), 0.5, 0.05), Math.PI / 2, 0);
     }
@@ -234,11 +234,11 @@ class PoseFilterTest {
   void theGyrosScaleErrorIsTheSameEveryTurn() {
     PoseFilter filter = placed(CONSIDERED, 0.01, 0);
 
-    filter.predict(0, 2 * Math.PI, 0, 0, 0, 0, YawSource.GYRO);
+    filter.predict(0, 2 * Math.PI, 0, 0, 0, 0, 0, YawSource.GYRO);
     double afterATurn = filter.covariance().headingStdDev();
-    filter.predict(2 * Math.PI, 2 * Math.PI, 0, 0, 0, 0, YawSource.GYRO);
+    filter.predict(2 * Math.PI, 2 * Math.PI, 0, 0, 0, 0, 0, YawSource.GYRO);
     double afterTwo = filter.covariance().headingStdDev();
-    filter.predict(4 * Math.PI, -4 * Math.PI, 0, 0, 0, 0, YawSource.GYRO);
+    filter.predict(4 * Math.PI, -4 * Math.PI, 0, 0, 0, 0, 0, YawSource.GYRO);
 
     assertThat(afterATurn).isCloseTo(0.003 * 2 * Math.PI, within(1e-12));
     assertThat(afterTwo).as("twice as far off").isCloseTo(2 * afterATurn, within(1e-12));
@@ -254,8 +254,8 @@ class PoseFilterTest {
   void eachImusScaleIsItsOwn() {
     PoseFilter filter = placed(CONSIDERED, 0.01, 0);
 
-    filter.predict(0, 6 * Math.PI, 0, 0, 0, 0, YawSource.GYRO);
-    filter.predict(6 * Math.PI, -6 * Math.PI, 0, 0, 0, 0, YawSource.BACKUP);
+    filter.predict(0, 6 * Math.PI, 0, 0, 0, 0, 0, YawSource.GYRO);
+    filter.predict(6 * Math.PI, -6 * Math.PI, 0, 0, 0, 0, 0, YawSource.BACKUP);
 
     double gyro = 0.003 * 6 * Math.PI;
     double backup = 0.005 * 6 * Math.PI;
@@ -268,7 +268,7 @@ class PoseFilterTest {
   void theWheelsTurningLeaveTheGyrosScaleOut() {
     PoseFilter filter = placed(CONSIDERED, 0.01, 0);
 
-    filter.predict(0, 2 * Math.PI, 0, 0, 0, 0, YawSource.WHEELS);
+    filter.predict(0, 2 * Math.PI, 0, 0, 0, 0, 0, YawSource.WHEELS);
 
     assertThat(filter.covariance().headingStdDev()).isZero();
   }
@@ -341,13 +341,20 @@ class PoseFilterTest {
   @Test
   void theUncertaintyComesBackAsKept() {
     PoseFilter filter = placed(CONSIDERED, 0.1, 0.02);
-    filter.predict(0, 1, 1, 0.5, 0.001, 0.0001, YawSource.GYRO);
+    filter.predict(0, 1, 1, 0.5, 0, 0.001, 0.0001, YawSource.GYRO);
     apply(filter, fix(new Translation2d(1, 0.6), new Translation2d(2, 1), 0.05), 3);
     double[] kept = new double[filter.uncertaintyLength()];
     filter.copyUncertaintyTo(kept, 0);
     PoseFilter other = new PoseFilter(CONSIDERED, TAGS);
 
-    other.restore(filter.x(), filter.y(), filter.headingOffset(), kept, 0);
+    other.restore(
+        filter.x(),
+        filter.y(),
+        filter.headingOffset(),
+        filter.gyroScale(),
+        filter.gyroDrift(),
+        kept,
+        0);
     apply(filter, fix(new Translation2d(1.1, 0.5), new Translation2d(2, 1), 0.05), 3);
     apply(other, fix(new Translation2d(1.1, 0.5), new Translation2d(2, 1), 0.05), 3);
 
@@ -366,15 +373,16 @@ class PoseFilterTest {
     PoseFilter filter = placed(TEXTBOOK, 0.1, 0.1);
     double[] kept = new double[filter.uncertaintyLength()];
     filter.copyUncertaintyTo(kept, 0);
-    // Row by row: x, y, and the heading's offset; xx at 0, xy at 1, yy at 4, the heading's at 8.
+    // Row by row, five to a row: x, y, the heading's offset, and the gyro's scale and drift; xx at
+    // 0, xy at 1 and 5, yy at 6, the heading's at 12.
     double[] underZero = kept.clone();
     underZero[0] = -1e-18;
     underZero[1] = 1e-12;
-    underZero[3] = 1e-12;
-    underZero[8] = -1e-20;
+    underZero[5] = 1e-12;
+    underZero[12] = -1e-20;
     double[] pastTheirVariances = kept.clone();
     pastTheirVariances[1] = 0.0100001;
-    pastTheirVariances[3] = 0.0100001;
+    pastTheirVariances[5] = 0.0100001;
 
     PoseCovariance rounded = restored(underZero);
     assertThat(rounded.xx()).isZero();
@@ -383,7 +391,7 @@ class PoseFilterTest {
     PoseCovariance together = restored(pastTheirVariances);
     assertThat(together.xy()).isCloseTo(Math.sqrt(together.xx() * together.yy()), within(1e-15));
     for (double broken : new double[] {Double.NaN, Double.POSITIVE_INFINITY}) {
-      for (int at : new int[] {0, 1, 4, 8}) {
+      for (int at : new int[] {0, 1, 6, 12}) {
         double[] bug = kept.clone();
         bug[at] = broken;
         PoseCovariance noIdea = restored(bug);
@@ -398,7 +406,7 @@ class PoseFilterTest {
   /** The covariance a filter given this uncertainty reports. */
   private static PoseCovariance restored(double[] uncertainty) {
     PoseFilter filter = new PoseFilter(TEXTBOOK, TAGS);
-    filter.restore(0, 0, 0, uncertainty, 0);
+    filter.restore(0, 0, 0, 0, 0, uncertainty, 0);
     return filter.covariance();
   }
 
@@ -420,5 +428,162 @@ class PoseFilterTest {
 
     assertThat(filter.x()).isCloseTo(fresh.x(), within(1e-12));
     assertThat(filter.covariance().xx()).isCloseTo(fresh.covariance().xx(), within(1e-15));
+  }
+
+  // ---- The gyro's scale, where the filter estimates it ----
+
+  /** Only the gyro's scale is in doubt, by 1%: every other error is new each time. */
+  private static final PoseFilter.Considered SCALE_ALONE =
+      new PoseFilter.Considered(0.01, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45));
+
+  /**
+   * A gyro whose drift is 0.001 rad/s in doubt at first, its scale wandering 0.0003 in a second and
+   * its drift 0.0002 rad/s.
+   */
+  private static final PoseFilter.GyroDoubt WANDERING =
+      new PoseFilter.GyroDoubt(0.001, 0.0003, 0.0002);
+
+  /** What a gyro reading 2% high shows for a quarter turn, and the turn the robot really made. */
+  private static final double SHOWN = 1.02 * Math.PI / 2;
+
+  private static final double REAL = Math.PI / 2;
+
+  /** A filter sure of where it starts and which way it faces, in doubt of the gyro's scale. */
+  private static PoseFilter sureOfAllButTheScale(
+      boolean positionFixesCorrectHeading, PoseFilter.GyroErrors gyroErrors) {
+    PoseFilter filter =
+        new PoseFilter(SCALE_ALONE, TAGS, positionFixesCorrectHeading, gyroErrors, WANDERING);
+    filter.set(new PoseReset(0, Pose2d.ZERO, PoseCovariance.fromStdDevs(0.01, 0.01, 0), "x"), 0);
+    return filter;
+  }
+
+  /**
+   * A heading found off after a turn is laid to the gyro's scale, since nothing else was in doubt:
+   * the scale is the miss over the turn. The next turn is then right with no camera at all, where a
+   * filter that only considers the scale is off by as much again.
+   */
+  @Test
+  void aHeadingFoundOffAfterATurnIsLaidToTheGyrosScale() {
+    PoseFilter estimating = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    PoseFilter considering = sureOfAllButTheScale(false, PoseFilter.GyroErrors.CONSIDERED);
+    for (PoseFilter filter : List.of(estimating, considering)) {
+      filter.predict(0, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
+      apply(filter, withHeading(new Rotation2d(REAL), 1.0, 1e-4), SHOWN, 0);
+      filter.predict(SHOWN, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
+    }
+
+    // Each radian the gyro shows adds this to the heading: the real turn less the shown, over it.
+    double scale = (REAL - SHOWN) / SHOWN;
+    assertThat(estimating.gyroScale()).isCloseTo(scale, within(2e-4));
+    assertThat(estimating.gyroScaleStdDev()).as("surer than it began").isLessThan(0.001);
+    assertThat(2 * SHOWN + estimating.headingOffset())
+        .as("the second turn, with no camera")
+        .isCloseTo(2 * REAL, within(1e-3));
+    assertThat(estimating.covariance().headingStdDev()).isLessThan(Math.toRadians(0.1));
+
+    assertThat(considering.gyroScale()).as("never corrected").isZero();
+    assertThat(considering.gyroScaleStdDev()).isCloseTo(0.01, within(1e-15));
+    assertThat(2 * SHOWN + considering.headingOffset())
+        .as("the second turn's miss, uncorrected")
+        .isCloseTo(2 * REAL + (SHOWN - REAL), within(1e-3));
+    assertThat(considering.covariance().headingStdDev())
+        .as("and its doubt, a quarter turn's worth")
+        .isCloseTo(0.01 * SHOWN, within(1e-4));
+  }
+
+  /**
+   * A position solved with the gyro's heading corrects the scale only where it may correct the
+   * heading: the heading is all the scale shows itself in. The fix here lands where a heading 0.03
+   * rad off puts it, 3 m from its tags.
+   */
+  @Test
+  void aPositionFixCorrectsTheScaleOnlyWhereItCorrectsTheHeading() {
+    PoseFilter leavingHeading = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    PoseFilter correctingHeading = sureOfAllButTheScale(true, PoseFilter.GyroErrors.ESTIMATED);
+    for (PoseFilter filter : List.of(leavingHeading, correctingHeading)) {
+      filter.predict(0, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
+      Rotation2d solvedWith = new Rotation2d(SHOWN);
+      apply(
+          filter,
+          fix(new Translation2d(0, -0.09), new Translation2d(3, 0), 0.001, solvedWith),
+          SHOWN,
+          0);
+    }
+
+    assertThat(leavingHeading.gyroScale()).isZero();
+    assertThat(leavingHeading.headingOffset()).isZero();
+    assertThat(correctingHeading.headingOffset()).as("turned toward the fix").isLessThan(-0.01);
+    assertThat(correctingHeading.gyroScale()).as("and the scale with it").isLessThan(-0.005);
+  }
+
+  /**
+   * The gyro's errors may wander: over a second the gyro turns the robot, each one's doubt grows by
+   * what it may have wandered in a second, and over four seconds by twice that. Where they are only
+   * considered, the scale's doubt stays as told and there is no drift to doubt.
+   */
+  @Test
+  void theGyrosErrorsDoubtGrowsAsTheyWander() {
+    PoseFilter estimating = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    PoseFilter considering = sureOfAllButTheScale(false, PoseFilter.GyroErrors.CONSIDERED);
+    assertThat(estimating.gyroDriftStdDev()).isCloseTo(0.001, within(1e-15));
+
+    estimating.predict(0, 0, 0, 0, 1, 0, 0, YawSource.GYRO);
+    considering.predict(0, 0, 0, 0, 1, 0, 0, YawSource.GYRO);
+
+    assertThat(estimating.gyroScaleStdDev()).isCloseTo(Math.hypot(0.01, 0.0003), within(1e-12));
+    assertThat(estimating.gyroDriftStdDev()).isCloseTo(Math.hypot(0.001, 0.0002), within(1e-12));
+    // A second of an unsure drift is that much unsure heading, beside what was there.
+    assertThat(estimating.covariance().headingStdDev()).isCloseTo(0.001, within(1e-12));
+    estimating.predict(0, 0, 0, 0, 3, 0, 0, YawSource.WHEELS);
+    assertThat(estimating.gyroScaleStdDev())
+        .as("the wheels turning the robot leave the gyro's errors as they were")
+        .isCloseTo(Math.hypot(0.01, 0.0003), within(1e-12));
+    assertThat(considering.gyroScaleStdDev()).isCloseTo(0.01, within(1e-15));
+    assertThat(considering.gyroDriftStdDev()).isZero();
+    assertThat(considering.covariance().headingStdDev()).isZero();
+  }
+
+  /**
+   * A heading found off after standing still is laid to the gyro's drift, since the gyro turned
+   * nothing for its scale to misread: the drift is the miss over the time. The next stretch is then
+   * right with no camera.
+   */
+  @Test
+  void aHeadingFoundOffAfterStandingIsLaidToTheGyrosDrift() {
+    PoseFilter filter = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    // Ten seconds in which the gyro's yaw crept 0.005 rad while the robot stood still.
+    double crept = 0.005;
+    filter.predict(0, crept, 0, 0, 10, 0, 0, YawSource.GYRO);
+    apply(filter, withHeading(Rotation2d.ZERO, 1.0, 1e-4), crept, 0);
+
+    assertThat(filter.gyroDrift()).as("radians a second").isCloseTo(-crept / 10, within(2e-5));
+    assertThat(crept + filter.headingOffset()).isCloseTo(0, within(1e-4));
+    filter.predict(crept, crept, 0, 0, 10, 0, 0, YawSource.GYRO);
+    assertThat(2 * crept + filter.headingOffset())
+        .as("ten seconds more, with no camera")
+        .isCloseTo(0, within(5e-4));
+  }
+
+  /**
+   * The scale is the gyro's, not the pose's. A heading told afresh keeps the scale already found,
+   * and the turns after it are corrected by it; what the heading is told, it is, as sure as told.
+   */
+  @Test
+  void aHeadingToldAfreshKeepsTheScaleFound() {
+    PoseFilter filter = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    filter.predict(0, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
+    apply(filter, withHeading(new Rotation2d(REAL), 1.0, 1e-4), SHOWN, 0);
+    double found = filter.gyroScale();
+
+    filter.resetHeading(0.5, 1e-6);
+
+    assertThat(filter.gyroScale()).isEqualTo(found);
+    assertThat(filter.covariance().headingStdDev()).isCloseTo(1e-3, within(1e-12));
+    filter.predict(SHOWN, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
+    assertThat(filter.headingOffset()).isCloseTo(0.5 + found * SHOWN, within(1e-12));
+    // The turn before the reset no longer bears on the heading: only this one's share of the
+    // scale's remaining doubt is added.
+    assertThat(filter.covariance().headingStdDev())
+        .isCloseTo(Math.hypot(1e-3, filter.gyroScaleStdDev() * SHOWN), within(1e-9));
   }
 }

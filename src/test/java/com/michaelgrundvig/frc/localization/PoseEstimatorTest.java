@@ -68,6 +68,34 @@ class PoseEstimatorTest {
       return drive(steps, vx, vy, omega, 0, true);
     }
 
+    /**
+     * Spins in place for some steps, the gyro reading this many times the turn the robot makes:
+     * 1.03 reads 3% high. The wheels report the turn it really makes.
+     */
+    Robot spin(int steps, double omega, double gyroReads) {
+      double dt = STEP / 1e9;
+      for (int i = 0; i < steps; i++) {
+        time += STEP;
+        gyroYaw += gyroReads * omega * dt;
+        estimator.addOdometry(time, new BodyMotion(0, 0, omega * dt, 0), gyroYaw, YawSource.GYRO);
+      }
+      return this;
+    }
+
+    /** A camera's heading, good to a fifth of a degree, with the robot where it is, taken now. */
+    VisionDecision seeHeading(double radians) {
+      estimator.addVision(
+          new VisionMeasurement(
+              time,
+              new Pose2d(estimator.pose().getTranslation(), new Rotation2d(radians)),
+              PoseCovariance.fromStdDevs(0.05, 0.05, Math.toRadians(0.2)),
+              VisionMeasurement.Lever.NONE,
+              "front",
+              List.of(25, 26),
+              VisionMeasurement.Solver.MULTI_TAG));
+      return estimator.update().get(0);
+    }
+
     Robot drive(int steps, double vx, double vy, double omega, double residual, boolean gyro) {
       double dt = STEP / 1e9;
       for (int i = 0; i < steps; i++) {
@@ -184,13 +212,31 @@ class PoseEstimatorTest {
     assertThat(covariance.yStdDev()).as("a 0.02 rad heading doubt over 4 m").isGreaterThan(0.09);
   }
 
+  /**
+   * A minute sitting still with no camera. The heading was placed to 0.02 rad, and the gyro's drift
+   * that does not repeat adds 0.5° in the minute. Where the gyro's steady drift is estimated, it
+   * has not been yet, so what it may be adds too: 5° a minute, for a minute.
+   */
   @Test
   void theGyroDriftsSoHeadingGrowsUnsureOverTime() {
-    Robot robot = new Robot().drive(15_000, 0, 0, 0); // a minute, sitting still
+    double placed = 0.02;
+    double wandering = Math.toRadians(0.5);
+    double steady = Math.toRadians(EstimatorConfig.DEFAULTS.gyroDriftStdDevDegreesPerMinute());
+    EstimatorConfig considering =
+        EstimatorConfigBuilder.builder(TEXTBOOK)
+            .gyroErrors(EstimatorConfig.GyroErrors.CONSIDERED)
+            .build();
+    Robot estimates = new Robot().drive(15_000, 0, 0, 0);
+    Robot considers = new Robot(considering, new PoseReset(0, START, PLACED, "start"));
+    considers.estimator.reset(new PoseReset(T0, START, PLACED, "placed"));
+    considers.drive(15_000, 0, 0, 0);
 
-    double headingStdDev = robot.estimate().covariance().headingStdDev();
-    // 0.02 rad when placed, plus 0.5 degrees a minute of drift.
-    assertThat(headingStdDev).isCloseTo(Math.hypot(0.02, Math.toRadians(0.5)), within(1e-4));
+    assertThat(considers.estimate().covariance().headingStdDev())
+        .isCloseTo(Math.hypot(placed, wandering), within(1e-4));
+    // A little over the three in squares: the steady drift may itself have changed in the minute.
+    double together = Math.sqrt(placed * placed + wandering * wandering + steady * steady);
+    assertThat(estimates.estimate().covariance().headingStdDev())
+        .isCloseTo(together, within(0.02 * together));
   }
 
   @Test
@@ -521,13 +567,19 @@ class PoseEstimatorTest {
   }
 
   /**
-   * Driving with an unsure heading ties the position's error to the heading's, but a position fix
-   * still never turns the heading, nor makes it surer: that's the gyro's, and the measurements with
-   * a heading of their own.
+   * Driving with an unsure heading ties the position's error to the heading's. Where only
+   * measurements with a heading of their own may correct the heading, a position fix still never
+   * turns it, nor makes it surer: that's the gyro's.
    */
   @Test
-  void aPositionFixNeverTurnsTheHeading() {
-    Robot robot = new Robot().drive(500, 1.0, 0, 0); // 2 m ahead, the heading unsure by 0.02 rad
+  void aPositionFixNeverTurnsTheHeadingWhereOnlyHeadingsMay() {
+    EstimatorConfig headingsOnly =
+        EstimatorConfigBuilder.builder(TEXTBOOK)
+            .headingCorrection(EstimatorConfig.HeadingCorrection.HEADING_MEASUREMENTS)
+            .build();
+    Robot robot = new Robot(headingsOnly, new PoseReset(0, START, PLACED, "start"));
+    robot.estimator.reset(new PoseReset(T0, START, PLACED, "placed"));
+    robot.drive(500, 1.0, 0, 0); // 2 m ahead, the heading unsure by 0.02 rad
     Rotation2d heading = robot.pose().getRotation();
     double headingStdDev = robot.estimate().covariance().headingStdDev();
 
@@ -614,7 +666,8 @@ class PoseEstimatorTest {
     assertThat(robot.pose().getRotation().getRadians()).isCloseTo(0.05, within(1e-4));
     double before = robot.pose().getRotation().getRadians();
     robot.drive(250, 0, 0, 1.0); // a radian of turning, by the gyro
-    assertThat(robot.pose().getRotation().getRadians() - before).isCloseTo(1.0, within(1e-9));
+    // The gyro's own turn, but for the little the one correction laid to its scale and drift.
+    assertThat(robot.pose().getRotation().getRadians() - before).isCloseTo(1.0, within(1e-6));
   }
 
   @Test
@@ -698,9 +751,17 @@ class PoseEstimatorTest {
   /** While the backup IMU turns odometry in the gyro's place, its own scale's doubt grows. */
   @Test
   void theBackupImuTurnsWithItsOwnScalesDoubt() {
-    Robot gyro = new Robot().drive(1, 0, 0, 0);
+    // A gyro whose scale is in doubt by 1° a turn, beside a backup IMU's 2°.
+    EstimatorConfig config =
+        EstimatorConfigBuilder.builder(TEXTBOOK)
+            .headingStdDevDegreesPerTurn(1.0)
+            .backupHeadingStdDevDegreesPerTurn(2.0)
+            .build();
+    Robot gyro = new Robot(config, new PoseReset(0, START, PLACED, "start"));
+    gyro.estimator.reset(new PoseReset(T0, START, PLACED, "placed"));
+    gyro.drive(1, 0, 0, 0);
     PoseEstimator backup =
-        new PoseEstimator(TEXTBOOK, point -> true, TAGS, new PoseReset(0, START, PLACED, "start"));
+        new PoseEstimator(config, point -> true, TAGS, new PoseReset(0, START, PLACED, "start"));
     backup.addOdometry(T0, new BodyMotion(0, 0, 0, 0), 0.7, YawSource.BACKUP);
     backup.reset(new PoseReset(T0, START, PLACED, "placed"));
     double yaw = 0.7;
@@ -712,9 +773,8 @@ class PoseEstimatorTest {
     gyro.drive(249, 0, 0, 2 * Math.PI);
 
     // A full turn on each: the backup's 2° a turn against the gyro's 1°.
-    double backupTurn =
-        Math.toRadians(EstimatorConfig.DEFAULTS.backupHeadingStdDevDegreesPerTurn());
-    double gyroTurn = Math.toRadians(EstimatorConfig.DEFAULTS.headingStdDevDegreesPerTurn());
+    double backupTurn = Math.toRadians(config.backupHeadingStdDevDegreesPerTurn());
+    double gyroTurn = Math.toRadians(config.headingStdDevDegreesPerTurn());
     assertThat(backup.estimate().covariance().headingStdDev()).isGreaterThan(backupTurn);
     assertThat(gyro.estimate().covariance().headingStdDev())
         .isGreaterThan(gyroTurn)
@@ -1184,6 +1244,58 @@ class PoseEstimatorTest {
     assertThat(withoutPlaces.get(0)).isEmpty();
     assertThat(alongTheTag[1]).as("tag 41, off the field").isLessThan(0.5 * shared);
     assertThat(withoutPlaces.get(1)).containsExactly(41);
+  }
+
+  /**
+   * A gyro reading 1% high, between three and four times what the estimator allows a gyro at first.
+   * The robot spins a quarter turn at a time, and a camera gives its heading after each. The
+   * estimator lays the misses to the gyro's scale, and from then on its heading is right at the end
+   * of a turn before any camera has spoken: one that only considers the scale is 0.9° off there
+   * every time.
+   */
+  @Test
+  void aGyroThatReadsItsTurnsHighIsFoundOutByTheCameras() {
+    double[] worstMissDegrees = new double[2];
+    double[] foundPercent = new double[2];
+    EstimatorConfig.GyroErrors[] ways = {
+      EstimatorConfig.GyroErrors.ESTIMATED, EstimatorConfig.GyroErrors.CONSIDERED
+    };
+    for (int way = 0; way < ways.length; way++) {
+      Robot robot =
+          new Robot(
+              EstimatorConfigBuilder.builder(TEXTBOOK).gyroErrors(ways[way]).build(),
+              new PoseReset(0, START, PLACED, "start"));
+      robot.estimator.reset(new PoseReset(T0, START, PLACED, "placed"));
+      double real = 0;
+      for (int quarter = 0; quarter < 16; quarter++) {
+        // Half a second at pi radians a second: a quarter turn.
+        robot.spin(125, Math.PI, 1.01);
+        real += Math.PI / 2;
+        double missDegrees =
+            Math.abs(robot.pose().getRotation().minus(new Rotation2d(real)).getDegrees());
+        boolean scaleHadTimeToBeFound = quarter >= 8;
+        if (scaleHadTimeToBeFound) {
+          worstMissDegrees[way] = Math.max(worstMissDegrees[way], missDegrees);
+        }
+        for (int image = 0; image < 5; image++) {
+          assertThat(robot.seeHeading(real).accepted()).as("quarter %d", quarter).isTrue();
+        }
+      }
+      foundPercent[way] = robot.estimator.gyroScalePercent();
+
+      // The heading half a second ago, as it is understood now: a quarter turn back.
+      Pose2d before = robot.estimator.poseAt(robot.time - 125 * STEP).orElseThrow();
+      if (ways[way] == EstimatorConfig.GyroErrors.ESTIMATED) {
+        assertThat(before.getRotation().minus(new Rotation2d(real - Math.PI / 2)).getDegrees())
+            .as("the heading a quarter turn ago")
+            .isCloseTo(0, within(0.05));
+      }
+    }
+
+    assertThat(foundPercent[0]).as("the scale found").isCloseTo(1.0, within(0.05));
+    assertThat(worstMissDegrees[0]).as("after a turn, before any camera").isLessThan(0.05);
+    assertThat(foundPercent[1]).as("a scale only considered").isZero();
+    assertThat(worstMissDegrees[1]).isCloseTo(0.9, within(0.1));
   }
 
   /** A field's tags, numbered from 1. */
