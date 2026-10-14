@@ -82,9 +82,11 @@ Every localizer is handed the same measurements. None sees an image.
 ## The two localizers
 
 **`DefaultLocalizer`** is the library's own estimator. It gates every measurement against the
-estimate, recovers when the cameras agree against odometry, lowers the wheels' trust when they
-slip, and keeps an honest uncertainty. It estimates the gyro's scale and drift, and watches each
-camera against the others for one knocked on its mount or stamped late. It reports every option.
+estimate, recovers when the cameras agree against odometry (two cameras, two tags, or a camera and
+a sign from the IMU that the robot was moved, never one camera repeating one tag), lowers the
+wheels' trust when they slip, and keeps an honest uncertainty. It estimates the gyro's scale and
+drift, and watches each camera against the others for one knocked on its mount or stamped late. It
+reports every option.
 
 **`WpilibLocalizer`** is WPILib's `SwerveDrivePoseEstimator`, fed as the default one is: every
 wheel reading, and the pipeline's measurements with their standard deviations. It keeps the
