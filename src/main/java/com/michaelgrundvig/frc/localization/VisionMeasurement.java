@@ -51,23 +51,51 @@ public record VisionMeasurement(
   }
 
   /**
-   * How a position solved with the gyro's heading leans on it.
+   * How a position solved with the gyro's heading leans on it, and on its camera's turn on its
+   * mount.
+   *
+   * <p>A heading off by an angle swings the position about the tags by that angle: the robot was
+   * placed by turning the camera's view of them by the heading. A camera turned on its mount by an
+   * angle swings the camera about the tags instead, and the robot with it, so it leans on the
+   * camera's own lever to the tags ({@link #cameraToTags}).
    *
    * @param heading the heading it was solved with: the estimate's, as of when it was solved
    * @param robotToTags from the robot's center to the tags it was solved from, on the field: their
    *     middle, weighted as the solve weighed them
+   * @param robotToCamera from the robot's center to the camera's lens, on the field, turned by the
+   *     heading it was solved with: where the camera sits on the robot
    */
-  public record Lever(Rotation2d heading, Translation2d robotToTags) {
+  public record Lever(Rotation2d heading, Translation2d robotToTags, Translation2d robotToCamera) {
     /** A solve that found its own heading: its position doesn't lean on the gyro's. */
-    public static final Lever NONE = new Lever(Rotation2d.ZERO, Translation2d.ZERO);
+    public static final Lever NONE =
+        new Lever(Rotation2d.ZERO, Translation2d.ZERO, Translation2d.ZERO);
 
     public Lever {
       if (!Double.isFinite(robotToTags.getX())
           || !Double.isFinite(robotToTags.getY())
+          || !Double.isFinite(robotToCamera.getX())
+          || !Double.isFinite(robotToCamera.getY())
           || !Double.isFinite(heading.getRadians())) {
         throw new IllegalArgumentException(
-            "a lever's heading and offset to its tags: " + heading + ", " + robotToTags);
+            "a lever's heading and offsets to its tags and its camera: "
+                + heading
+                + ", "
+                + robotToTags
+                + ", "
+                + robotToCamera);
       }
+    }
+
+    /** A lever whose camera sits at the robot's center. */
+    public Lever(Rotation2d heading, Translation2d robotToTags) {
+      this(heading, robotToTags, Translation2d.ZERO);
+    }
+
+    /**
+     * From the camera's lens to the tags, on the field: what its turn swings the position about.
+     */
+    public Translation2d cameraToTags() {
+      return robotToTags.minus(robotToCamera);
     }
   }
 

@@ -363,7 +363,10 @@ public final class VisionPipeline {
             seen.timestampNanos(),
             new Pose2d(position, measuredHeading),
             PoseCovariance.fromStdDevs(spread, spread, headingStdDev),
-            new VisionMeasurement.Lever(heading, fixes.robotToTags()),
+            new VisionMeasurement.Lever(
+                heading,
+                fixes.robotToTags(),
+                new Translation2d(robotToCamera.getX(), robotToCamera.getY()).rotateBy(heading)),
             image.camera().name(),
             ids(known),
             fixes.weights,

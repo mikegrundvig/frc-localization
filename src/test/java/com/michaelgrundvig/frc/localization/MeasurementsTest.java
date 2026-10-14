@@ -161,7 +161,19 @@ class MeasurementsTest {
         .hasMessageContaining("robot's clock");
     assertThatThrownBy(
             () -> new VisionMeasurement.Lever(Rotation2d.ZERO, new Translation2d(Double.NaN, 0)))
-        .hasMessageContaining("offset to its tags");
+        .hasMessageContaining("offsets to its tags");
+    assertThatThrownBy(
+            () ->
+                new VisionMeasurement.Lever(
+                    Rotation2d.ZERO, new Translation2d(3, 0), new Translation2d(0, Double.NaN)))
+        .hasMessageContaining("and its camera");
+    VisionMeasurement.Lever lever =
+        new VisionMeasurement.Lever(
+            Rotation2d.ZERO, new Translation2d(3, 1), new Translation2d(0.3, 0.2));
+    assertThat(lever.cameraToTags()).isEqualTo(new Translation2d(2.7, 0.8));
+    assertThat(new VisionMeasurement.Lever(Rotation2d.ZERO, new Translation2d(3, 1)).cameraToTags())
+        .as("a camera at the robot's center")
+        .isEqualTo(new Translation2d(3, 1));
   }
 
   /**
