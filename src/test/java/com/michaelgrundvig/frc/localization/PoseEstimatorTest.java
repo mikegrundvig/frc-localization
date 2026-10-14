@@ -449,7 +449,12 @@ class PoseEstimatorTest {
     assertThat(estimator.estimate().mode()).isEqualTo(LocalizationEstimate.Mode.INITIALIZING);
   }
 
-  /** Knocked a meter sideways, the wheels saw nothing; the cameras all agree it moved. */
+  /**
+   * The images after a placement all put the robot a meter sideways of it. No camera backed the
+   * placement, which is a person's word, so their agreement moves the estimate. (The tests below
+   * that recover the same way rest on that too; RecoveryCasesTest has which sources count once a
+   * camera has backed it.)
+   */
   @Test
   void whenRejectedMeasurementsAgreeOdometryWasWrongAndTheEstimateRecovers() {
     Robot robot = new Robot().drive(10, 0, 0, 0);
@@ -1094,7 +1099,8 @@ class PoseEstimatorTest {
 
   /**
    * Once a camera's own heading agrees with a driver's reset, positions solved with it say where
-   * the robot is again: knocked a meter sideways, they agree it moved, and it recovers to them.
+   * the robot is again: knocked a meter sideways, two cameras agree it moved, and it recovers to
+   * them.
    */
   @Test
   void aResetACamerasHeadingBacksLetsItsPositionsRecoverAKnock() {
@@ -1103,8 +1109,8 @@ class PoseEstimatorTest {
     assertThat(robot.drive(8, 0, 0, 0).seeWithHeading(START).accepted()).isTrue();
     Pose2d knocked = new Pose2d(1, 2, Rotation2d.ZERO);
 
-    for (int i = 0; i < 3; i++) {
-      robot.drive(8, 0, 0, 0).seeLeaning(knocked, new Translation2d(3, -1), 0.05);
+    for (String camera : List.of("front", "back", "front")) {
+      robot.drive(8, 0, 0, 0).seeFrom(camera, knocked);
     }
 
     assertThat(robot.estimate().health().recoveries()).isEqualTo(1);

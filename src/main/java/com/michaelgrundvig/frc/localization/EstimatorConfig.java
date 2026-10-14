@@ -108,7 +108,10 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     of freedom)
  * @param gateChiSquaredPose the same for a measurement with heading (16.3: 99.9%, 3 degrees)
  * @param recoveryMeasurements how many rejected measurements must agree with each other, within the
- *     recovery window, before odometry is judged wrong and the estimate jumps to them
+ *     recovery window, before odometry is judged wrong and the estimate jumps to them. They must
+ *     come from two cameras or two tags, or follow a sign that the robot was moved unseen (a jolt,
+ *     a slide, a tilt, being disabled or placed): one camera repeating one tag's answer is one
+ *     source however many times it says it
  * @param recoveryWindowSeconds how recent those rejected measurements must be
  * @param recoveryAgreementMeters how closely their innovations must agree
  * @param recoveryStdDevMeters the position uncertainty after a recovery

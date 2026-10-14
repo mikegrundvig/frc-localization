@@ -36,10 +36,14 @@ import org.wpilib.math.util.MathUtil;
  * whenever a replay applies it anew: one that a later-arriving, earlier image rules out is taken
  * back, as it would have been rejected had the two come in order.
  *
- * <p><b>Recovery.</b> When several rejected measurements agree with each other, odometry was the
- * one that was wrong (a collision, a spin), and the estimate recovers to them ({@link Recovery}).
- * It recovers to their heading first, if that is what they agree is wrong (a bad heading reset, a
- * robot placed backwards), since every position worked out with a wrong heading is wrong too.
+ * <p><b>Recovery.</b> When several rejected measurements agree with each other, for reasons
+ * independent of each other, odometry was the one that was wrong (a collision, a spin), and the
+ * estimate recovers to them ({@link Recovery}). Independent means two cameras, two tags, or a
+ * camera and a sign from the other sensors that the robot may have been moved unseen ({@link
+ * MotionEvidence}): one camera repeating one tag's answer is one source, and a misread tag repeats
+ * itself as faithfully as a shove would. It recovers to their heading first, if that is what they
+ * agree is wrong (a bad heading reset, a robot placed backwards), since every position worked out
+ * with a wrong heading is wrong too.
  *
  * <p><b>Honesty.</b> Its uncertainty is meant to be honest, since gates, χ² tests, and any bound on
  * the error trust it: the error should go past 3.72 times the spread it claims no more than once in
@@ -101,6 +105,9 @@ public final class PoseEstimator {
   private final WheelDoubt wheelDoubt;
   private final ErrorPlaces places;
   private final Recovery recovery;
+
+  /** What besides the cameras says the robot may have been moved unseen. */
+  private final MotionEvidence motionEvidence = new MotionEvidence();
 
   /** Reads the gyro's drift off each stretch of standing still. */
   private final GyroAtRest gyroAtRest;
@@ -424,6 +431,8 @@ public final class PoseEstimator {
       return;
     }
     wheelDoubt.conditions(conditions, history.newestTime());
+    motionEvidence.conditions(
+        conditions, wheelDoubt.shareOfTravelThatCounts(), history.newestTime());
   }
 
   /**
@@ -542,6 +551,7 @@ public final class PoseEstimator {
    */
   public void reset(PoseReset reset) {
     placed = true;
+    motionEvidence.placed();
     if (reset.covariance().hasHeading()) {
       headingInDoubt = false;
     }
@@ -573,6 +583,7 @@ public final class PoseEstimator {
       throw new IllegalArgumentException("a heading reset's uncertainty: " + stdDevRadians);
     }
     headingInDoubt = true;
+    motionEvidence.placed();
     recovery.clear();
     consecutiveRejections = 0;
     double variance = square(stdDevRadians);
@@ -879,6 +890,8 @@ public final class PoseEstimator {
     recovery.rejected(
         new Recovery.Rejected(
             replayed.time(),
+            measurement.camera(),
+            measurement.tagIds(),
             innovation.xMeters(),
             innovation.yMeters(),
             innovation.headingRadians(),
@@ -892,15 +905,16 @@ public final class PoseEstimator {
     consecutiveRejections = 0;
     recovery.clear();
     lastAcceptedNanos = Math.max(lastAcceptedNanos, replayed.time());
+    motionEvidence.restedOnCamera(replayed.time());
     agreements.add(new Agreement(replayed.time(), innovation.distanceMeters()));
     placed = true;
   }
 
   /**
-   * When enough recent rejected measurements agree with each other, the cameras are right and
-   * odometry is wrong. The estimate turns to the heading they agree on, if they agree its heading
-   * is wrong. Otherwise it jumps to where they put the robot. Either way its uncertainty starts
-   * afresh.
+   * When enough recent rejected measurements agree with each other, for independent reasons, the
+   * cameras are right and odometry is wrong. The estimate turns to the heading they agree on, if
+   * they agree its heading is wrong. Otherwise it jumps to where they put the robot. Either way its
+   * uncertainty starts afresh.
    */
   private void recoverIfTheCamerasAgree() {
     if (!started) {
@@ -910,7 +924,8 @@ public final class PoseEstimator {
     if (!recovery.hasEnough()) {
       return;
     }
-    OptionalDouble turn = recovery.headingCorrection();
+    MotionEvidence.Sign sign = motionEvidence.sinceTheCameras();
+    OptionalDouble turn = recovery.headingCorrection(sign);
     if (turn.isPresent()) {
       filter.turn(
           turn.getAsDouble(),
@@ -920,7 +935,7 @@ public final class PoseEstimator {
       startAfreshAfterRecovering();
       return;
     }
-    Optional<Recovery.Move> move = recovery.positionCorrection();
+    Optional<Recovery.Move> move = recovery.positionCorrection(sign);
     if (move.isEmpty()) {
       return;
     }
@@ -930,6 +945,7 @@ public final class PoseEstimator {
     // The estimate is as recent as the images it now rests on. A recovery made later, once an
     // older image that held it back has aged out of the window, must not make them new.
     lastAcceptedNanos = Math.max(lastAcceptedNanos, move.get().newestTaken());
+    motionEvidence.restedOnCamera(move.get().newestTaken());
     placed = true;
   }
 

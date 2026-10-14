@@ -15,6 +15,16 @@ import org.wpilib.math.util.MathUtil;
  * estimate should go to the cameras. This class keeps the recent rejected measurements'
  * disagreements and says what the latest of them agree on. The estimator does the moving.
  *
+ * <p>Agreeing is not enough: they must agree for reasons that are independent of each other. A
+ * camera that misreads a tag as another of the field's puts every image off by the same distance,
+ * in the same direction, for as long as it sees that tag, so its images agree with each other as
+ * well as a shove's would, and move with the robot as a shove's would. What tells the two apart is
+ * a second source: another camera, another tag (a misread is of one tag, and two tags read rightly
+ * land the robot in one place), or a sign from the robot's other sensors that it may have been
+ * moved where its wheels could not see ({@link MotionEvidence}). A heading needs another camera or
+ * such a sign: every tag a camera sees is turned by that camera's mount alike, so its tags do not
+ * vouch for each other's heading.
+ *
  * <p>The heading is settled before the position. Positions solved with the estimate's own heading
  * agree with each other whether it is the position or the heading that is wrong: a heading off by
  * an angle turns every one of them about its tags alike. So while the heading is in doubt those
@@ -37,6 +47,8 @@ final class Recovery {
    * A rejected measurement's disagreement with the estimate.
    *
    * @param time when its image was taken
+   * @param camera which camera took it
+   * @param tags the tags it was solved from
    * @param innovationX how far its position was from the estimate's along the field's x, in meters
    * @param innovationY and along y
    * @param innovationHeading how far its heading was from the estimate's, in radians; NaN when the
@@ -49,6 +61,8 @@ final class Recovery {
    */
   record Rejected(
       long time,
+      String camera,
+      List<Integer> tags,
       double innovationX,
       double innovationY,
       double innovationHeading,
@@ -112,9 +126,14 @@ final class Recovery {
    * the images taken on the way disagree with each other. What matters is whether the cameras agree
    * now.
    *
+   * <p>They must come from two cameras, or something besides the cameras must say the robot may
+   * have moved: one camera turned on its mount gives the same wrong heading in every image.
+   *
+   * @param sign what besides the cameras says the robot may have moved since the estimate last
+   *     rested on a camera
    * @return the turn in radians, or empty if they do not agree on one
    */
-  OptionalDouble headingCorrection() {
+  OptionalDouble headingCorrection(MotionEvidence.Sign sign) {
     latest.clear();
     for (Iterator<Rejected> newestFirst = recent.descendingIterator();
         newestFirst.hasNext() && latest.size() < measurementsNeeded; ) {
@@ -146,6 +165,10 @@ final class Recovery {
     if (!asksForATurn) {
       return OptionalDouble.empty();
     }
+    boolean independent = sign != MotionEvidence.Sign.NONE || fromTwoCameras();
+    if (!independent) {
+      return OptionalDouble.empty();
+    }
     return OptionalDouble.of(mean);
   }
 
@@ -154,8 +177,15 @@ final class Recovery {
    * newest few that say the position is wrong, as many as a recovery needs, every one within the
    * agreement distance of their mean. Older ones that disagree do not hold it back: they were taken
    * while the robot was still being moved.
+   *
+   * <p>They must come from two cameras, or rest on two tags, or something besides the cameras must
+   * say the robot may have moved. One camera reading one tag is one source however often it says
+   * it.
+   *
+   * @param sign what besides the cameras says the robot may have moved since the estimate last
+   *     rested on a camera
    */
-  Optional<Move> positionCorrection() {
+  Optional<Move> positionCorrection(MotionEvidence.Sign sign) {
     latest.clear();
     for (Iterator<Rejected> newestFirst = recent.descendingIterator();
         newestFirst.hasNext() && latest.size() < measurementsNeeded; ) {
@@ -183,6 +213,34 @@ final class Recovery {
         return Optional.empty();
       }
     }
+    boolean independent = sign != MotionEvidence.Sign.NONE || fromTwoCameras() || fromTwoTags();
+    if (!independent) {
+      return Optional.empty();
+    }
     return Optional.of(new Move(new Translation2d(meanX, meanY), newestTaken));
+  }
+
+  /** Whether the rejections being judged came from more than one camera. */
+  private boolean fromTwoCameras() {
+    String first = latest.get(0).camera();
+    for (Rejected rejected : latest) {
+      if (!rejected.camera().equals(first)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether the rejections being judged were solved from more than one tag between them. */
+  private boolean fromTwoTags() {
+    int first = latest.get(0).tags().get(0);
+    for (Rejected rejected : latest) {
+      for (int tag : rejected.tags()) {
+        if (tag != first) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }

@@ -42,7 +42,8 @@
  *       through, {@code PoseFilter} does the filter's math (and keeps the errors that repeat,
  *       below) with {@code CameraCorrection} working each camera measurement, {@code WheelDoubt}
  *       says how far each step's wheels are doubted, and {@code Recovery} judges when the cameras
- *       agree that odometry is wrong.
+ *       agree that odometry is wrong, for reasons independent of each other: two cameras, two tags,
+ *       or a sign from the other sensors that the robot was moved unseen ({@code MotionEvidence}).
  *   <li><b>Wheels:</b> an {@link com.michaelgrundvig.frc.localization.OdometrySample} of every
  *       wheel, turned into the robot's {@link com.michaelgrundvig.frc.localization.BodyMotion} by
  *       the drivetrain's {@link com.michaelgrundvig.frc.localization.DriveKinematicsModel} (swerve
