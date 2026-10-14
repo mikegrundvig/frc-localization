@@ -61,16 +61,12 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     the turning
  * @param wheelHeadingStdDevDegreesPerTurn the same for heading from the wheels, used only while
  *     both IMUs are lost; its errors are taken as new with every turn
- * @param cameraTurnStdDevDegrees how far each camera may be turned from its configured mount, the
- *     same in every image: what calibrating its mount leaves, and its lens. A camera turned by an
- *     angle puts its tags, and so the robot, that angle times their distance off, as a heading
- *     error does, and its headings by the angle. However many images it takes, the estimator never
- *     trusts a camera's positions or headings more than this allows.
  * @param cameraShiftStdDevMeters how far each camera's positions may be off the same way image
- *     after image, beyond its turn and the tags': its mount's shift (what calibrating it leaves),
- *     along the robot's forward and left, so it turns with the robot. Today it also stands in for a
- *     single tag's solve coming out short from noisy corners, which hangs on the tag's range and
- *     angle and is shared by every camera seeing it face-on: a stop-gap (docs/values.md).
+ *     after image, beyond its mount, its turn and the tags', along the robot's forward and left, so
+ *     it turns with the robot. How far the mount itself may be off is the camera's own ({@code
+ *     CameraConfig.mountTolerance}), and adds to this. It stands in for a single tag's solve coming
+ *     out short from noisy corners, which hangs on the tag's range and angle and is shared by every
+ *     camera seeing it face-on: a stop-gap (docs/values.md).
  * @param cameraShiftStdDevDegrees and how far its headings may, beyond its turn: tags off the
  *     layout turn a multi-tag solve's heading by how far off they are over how far apart they sit
  * @param cameraWatchMeasurements how many of a camera's latest accepted measurements its mount and
@@ -145,7 +141,6 @@ public record EstimatorConfig(
     double backupHeadingStdDevDegreesPerTurn,
     double headingNoiseDegreesPerTurn,
     double wheelHeadingStdDevDegreesPerTurn,
-    double cameraTurnStdDevDegrees,
     double cameraShiftStdDevMeters,
     double cameraShiftStdDevDegrees,
     int cameraWatchMeasurements,
@@ -189,8 +184,7 @@ public record EstimatorConfig(
           .backupHeadingStdDevDegreesPerTurn(2.0)
           .headingNoiseDegreesPerTurn(0.1)
           .wheelHeadingStdDevDegreesPerTurn(10)
-          .cameraTurnStdDevDegrees(0.25)
-          .cameraShiftStdDevMeters(0.005)
+          .cameraShiftStdDevMeters(0.004)
           .cameraShiftStdDevDegrees(2.0)
           .cameraWatchMeasurements(25)
           .cameraClockStdDevSeconds(0.003)
@@ -234,7 +228,6 @@ public record EstimatorConfig(
             "backupHeadingStdDevDegreesPerTurn", backupHeadingStdDevDegreesPerTurn, nonNegative())
         .field("headingNoiseDegreesPerTurn", headingNoiseDegreesPerTurn, nonNegative())
         .field("wheelHeadingStdDevDegreesPerTurn", wheelHeadingStdDevDegreesPerTurn, nonNegative())
-        .field("cameraTurnStdDevDegrees", cameraTurnStdDevDegrees, nonNegative())
         .field("cameraShiftStdDevMeters", cameraShiftStdDevMeters, nonNegative())
         .field("cameraShiftStdDevDegrees", cameraShiftStdDevDegrees, nonNegative())
         .field("cameraWatchMeasurements", cameraWatchMeasurements, atLeast(20))

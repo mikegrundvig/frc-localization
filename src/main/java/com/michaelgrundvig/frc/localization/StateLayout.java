@@ -11,34 +11,36 @@ package com.michaelgrundvig.frc.localization;
 final class StateLayout {
   private StateLayout() {}
 
-  // The state's five values, in the order every row and column follows: where the robot is, the
-  // heading offset, and the gyro's two errors, its scale and its drift. A camera measurement's
-  // rows follow the first three: its x, its y, and its heading if it has one. No measurement has
-  // a row for either of the gyro's errors.
+  // The state's values, in the order every row and column follows: where the robot is, the heading
+  // offset, the gyro's two errors, its scale and its drift, and then each camera's turn on its
+  // mount, one for each camera the filter keeps apart. A camera measurement's rows follow the first
+  // three: its x, its y, and its heading if it has one. No measurement has a row of its own for the
+  // gyro's errors or a camera's turn.
   static final int X = 0;
   static final int Y = 1;
   static final int HEADING = 2;
   static final int GYRO_SCALE = 3;
   static final int GYRO_DRIFT = 4;
-  static final int STATES = 5;
+
+  /** The turn on its mount of the camera with place 0; the next camera's follows it, and so on. */
+  static final int FIRST_CAMERA_TURN = 5;
+
+  static final int STATES = FIRST_CAMERA_TURN + ConsideredErrors.MAX_CAMERAS;
 
   /** A measurement of position alone has two rows; one with a heading of its own has three. */
   static final int POSITION_ROWS = 2;
 
   static final int POSE_ROWS = 3;
 
-  // The cells of the pose's own block of the 5 by 5 covariance, stored row by row, named by the
-  // row's and the column's value: XH is the covariance of x with the heading.
-  static final int XX = 0;
-  static final int XY = 1;
-  static final int XH = 2;
-  static final int YX = 5;
-  static final int YY = 6;
-  static final int YH = 7;
-  static final int HX = 10;
-  static final int HY = 11;
-  static final int HH = 12;
   static final int CELLS = STATES * STATES;
+
+  // The cells of the pose's own block of the covariance, named by the row's and the column's
+  // value: XY is the covariance of x with y.
+  static final int XX = cell(X, X);
+  static final int XY = cell(X, Y);
+  static final int YX = cell(Y, X);
+  static final int YY = cell(Y, Y);
+  static final int HH = cell(HEADING, HEADING);
 
   /**
    * Where a cell sits in an array with one row or column for each value of the state, stored row by
@@ -48,5 +50,15 @@ final class StateLayout {
    */
   static int cell(int row, int column) {
     return row * STATES + column;
+  }
+
+  /** Where a camera's turn on its mount sits in the state, by the camera's place. */
+  static int turnOf(int camera) {
+    return FIRST_CAMERA_TURN + camera;
+  }
+
+  /** Whether a value of the state is a camera's turn on its mount. */
+  static boolean isACameraTurn(int state) {
+    return state >= FIRST_CAMERA_TURN;
   }
 }

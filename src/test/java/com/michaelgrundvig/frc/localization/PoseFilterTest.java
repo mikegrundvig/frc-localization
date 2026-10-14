@@ -373,16 +373,15 @@ class PoseFilterTest {
     PoseFilter filter = placed(TEXTBOOK, 0.1, 0.1);
     double[] kept = new double[filter.uncertaintyLength()];
     filter.copyUncertaintyTo(kept, 0);
-    // Row by row, five to a row: x, y, the heading's offset, and the gyro's scale and drift; xx at
-    // 0, xy at 1 and 5, yy at 6, the heading's at 12.
+    // Row by row, a row for each value of the state, as StateLayout names the pose's cells.
     double[] underZero = kept.clone();
-    underZero[0] = -1e-18;
-    underZero[1] = 1e-12;
-    underZero[5] = 1e-12;
-    underZero[12] = -1e-20;
+    underZero[StateLayout.XX] = -1e-18;
+    underZero[StateLayout.XY] = 1e-12;
+    underZero[StateLayout.YX] = 1e-12;
+    underZero[StateLayout.HH] = -1e-20;
     double[] pastTheirVariances = kept.clone();
-    pastTheirVariances[1] = 0.0100001;
-    pastTheirVariances[5] = 0.0100001;
+    pastTheirVariances[StateLayout.XY] = 0.0100001;
+    pastTheirVariances[StateLayout.YX] = 0.0100001;
 
     PoseCovariance rounded = restored(underZero);
     assertThat(rounded.xx()).isZero();
@@ -391,7 +390,7 @@ class PoseFilterTest {
     PoseCovariance together = restored(pastTheirVariances);
     assertThat(together.xy()).isCloseTo(Math.sqrt(together.xx() * together.yy()), within(1e-15));
     for (double broken : new double[] {Double.NaN, Double.POSITIVE_INFINITY}) {
-      for (int at : new int[] {0, 1, 6, 12}) {
+      for (int at : new int[] {StateLayout.XX, StateLayout.XY, StateLayout.YY, StateLayout.HH}) {
         double[] bug = kept.clone();
         bug[at] = broken;
         PoseCovariance noIdea = restored(bug);

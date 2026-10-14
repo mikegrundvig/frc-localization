@@ -94,7 +94,8 @@ public final class DefaultLocalizer implements Localizer {
       DriveKinematicsModel kinematics,
       EstimatorConfig config) {
     this(
-        new PoseEstimator(config, field::contains, field.tags().keySet(), notPlacedYet(field)),
+        new PoseEstimator(
+            config, field::contains, field.tags().keySet(), robot.cameras(), notPlacedYet(field)),
         kinematics,
         field.terrain(),
         robot);

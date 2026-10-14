@@ -91,10 +91,11 @@ final class CameraWatch {
   private final double kept;
 
   /**
-   * What a camera that sits where it was calibrated may still be off by, as the filter already
-   * allows for: its turn on its mount, in radians, and its shift, in meters, each as a variance.
+   * What a camera may still be off by that the filter already allows for: its turn on its mount, in
+   * radians, by its place, and its shift, in meters, each as a variance. The filter estimates each
+   * camera's turn, and tells the watch how sure of it it is now ({@link #allowTurn}).
    */
-  private final double allowedTurnVariance;
+  private final double[] allowedTurnVariance = new double[ConsideredErrors.MAX_CAMERAS];
 
   private final double allowedShiftVariance;
 
@@ -170,7 +171,8 @@ final class CameraWatch {
    * @param memory how many of a camera's latest measurements it is judged by, in effect: each new
    *     one takes 1/memory off the weight of all before it
    * @param allowedTurnStdDevRadians how far a calibrated camera may be turned on its mount, which
-   *     the filter already allows for: the watch looks only for more than that could be
+   *     the filter already allows for: the watch looks only for more than that could be. It holds
+   *     for each camera until the filter says otherwise ({@link #allowTurn})
    * @param allowedShiftStdDevMeters and how far it may be shifted
    * @param allowedLateStdDevSeconds how late or early a camera's stamps may be while its time sync
    *     works: the watch looks only for more than that could be
@@ -185,7 +187,7 @@ final class CameraWatch {
           "judge a camera by at least " + (int) (2 * FEWEST_TO_JUDGE) + " measurements: " + memory);
     }
     kept = 1 - 1.0 / memory;
-    allowedTurnVariance = allowedTurnStdDevRadians * allowedTurnStdDevRadians;
+    java.util.Arrays.fill(allowedTurnVariance, allowedTurnStdDevRadians * allowedTurnStdDevRadians);
     allowedShiftVariance = allowedShiftStdDevMeters * allowedShiftStdDevMeters;
     allowedLateVariance = allowedLateStdDevSeconds * allowedLateStdDevSeconds;
     java.util.Arrays.fill(heardNanos, Long.MIN_VALUE / 2);
@@ -260,6 +262,40 @@ final class CameraWatch {
     lateArmDotApartSum[camera] =
         kept * lateArmDotApartSum[camera] + lateArmForward * apartForward + lateArmLeft * apartLeft;
     judge(camera);
+  }
+
+  /**
+   * How far a camera may be turned on its mount that the filter already allows for, from now on, as
+   * a variance in radians squared: the doubt of the filter's own estimate of its turn. The misses
+   * the watch is given have that estimate taken off, so what is left is either within this doubt,
+   * which is the filter's to learn, or the watch's to find.
+   */
+  void allowTurn(int camera, double variance) {
+    if (ConsideredErrors.hasPlace(camera)) {
+      allowedTurnVariance[camera] = variance;
+    }
+  }
+
+  /**
+   * Forgets what the watch has judged of a camera's mount, and the misses it judged it by: its turn
+   * has just been opened up again, and its misses from before say nothing of its mount now. Its
+   * lateness stays as judged until its next misses say otherwise.
+   */
+  void forgetMount(int camera) {
+    if (!ConsideredErrors.hasPlace(camera)) {
+      return;
+    }
+    weight[camera] = 0;
+    apartForwardSum[camera] = 0;
+    apartLeftSum[camera] = 0;
+    apartSquaredSum[camera] = 0;
+    distanceSum[camera] = 0;
+    lateArmForwardSum[camera] = 0;
+    lateArmLeftSum[camera] = 0;
+    lateArmSquaredSum[camera] = 0;
+    lateArmDotApartSum[camera] = 0;
+    offForward[camera] = 0;
+    offLeft[camera] = 0;
   }
 
   /** Whether a camera's newest miss is of the same moment as an image taken at a time. */
@@ -432,7 +468,8 @@ final class CameraWatch {
     double forward = meanForward - lateSeconds * armForward;
     double left = meanLeft - lateSeconds * armLeft;
     double tagDistance = distanceSum[camera] / n;
-    double allowedSquared = allowedShiftVariance + allowedTurnVariance * tagDistance * tagDistance;
+    double allowedSquared =
+        allowedShiftVariance + allowedTurnVariance[camera] * tagDistance * tagDistance;
     double soundVariance = noiseEachAxis / n + allowedSquared;
     // What is unsure of the lateness makes the off unsure only along the mean late arm, the way
     // a lateness moves a measurement. So the off is kept in two parts: the part along the mean

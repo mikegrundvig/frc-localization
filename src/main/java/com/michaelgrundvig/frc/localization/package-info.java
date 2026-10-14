@@ -113,9 +113,14 @@
  *       cameras seeing the same tags share its error, and turning away and back finds it again.
  * </ul>
  *
- * <p>The filter keeps these as "consider" parameters: errors it accounts for but never estimates.
- * Their sizes are in {@link com.michaelgrundvig.frc.localization.EstimatorConfig}, and
- * docs/values.md says how to measure each.
+ * <p>The filter estimates the gyro's errors and each camera's turn on its mount, learning them as
+ * the robot drives, and keeps the rest as "consider" parameters: errors it accounts for but never
+ * estimates. What the cameras' turns share it carries too, since only the wheels could tell it from
+ * a heading error, and a wheel's own steady error would be learned in its place. Each camera's
+ * mount is as unsure at first as its tolerance in the robot's description says ({@code
+ * CameraConfig.mountTolerance}); the other sizes are in {@link
+ * com.michaelgrundvig.frc.localization.EstimatorConfig}, and docs/values.md says how to measure
+ * each.
  */
 @NullMarked
 package com.michaelgrundvig.frc.localization;

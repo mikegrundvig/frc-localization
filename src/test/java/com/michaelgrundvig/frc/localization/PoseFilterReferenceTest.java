@@ -15,11 +15,12 @@ import org.wpilib.math.util.MathUtil;
 
 /**
  * {@link PoseFilter} against the textbook it shortcuts: one Schmidt-Kalman filter over the whole
- * augmented state (x, y, the heading offset, the gyro's scale and drift, and every considered
- * error), each update in Joseph form, written plainly with full matrices. The filter keeps only
- * what it needs of that (the 5x5 covariance, and how the estimate relates to each considered
- * error), so random sequences of every operation it has must leave both with the same estimate and
- * the same covariance, and the joint covariance must stay positive semidefinite.
+ * augmented state (x, y, the heading offset, the gyro's scale and drift, each camera's turn on its
+ * mount, and every considered error), each update in Joseph form, written plainly with full
+ * matrices. The filter keeps only what it needs of that (the covariance of what it estimates, and
+ * how that relates to each considered error), so random sequences of every operation it has must
+ * leave both with the same estimate and the same covariance, and the joint covariance must stay
+ * positive semidefinite.
  */
 class PoseFilterReferenceTest {
   private static final int PER_CAMERA = 4;
@@ -41,17 +42,26 @@ class PoseFilterReferenceTest {
   /** Where the gyro's drift sits in the augmented state: last, after every considered error. */
   private static final int DRIFT = N - 1;
 
-  /** The filter's own state: x, y, the heading offset, and the gyro's scale and drift. */
-  private static final int STATES = 5;
+  /**
+   * The filter's own state: x, y, the heading offset, the gyro's scale and drift, and each camera's
+   * turn on its mount.
+   */
+  private static final int STATES = StateLayout.STATES;
 
   /** Where each value of the filter's state sits in the augmented state. */
-  private static final int[] STATE_AT = {0, 1, 2, 3, DRIFT};
+  private static final int[] STATE_AT = stateAt();
 
   /** How many errors the filter considers: everything beyond its state. */
   private static final int CONSIDERED = N - STATES;
 
+  /** Where each error the filter considers sits in the augmented state, in the filter's order. */
+  private static final int[] CONSIDERED_AT = consideredAt();
+
   /** Where the first of the considered errors sits in the augmented state. */
   private static final int FIRST_CONSIDERED = 4;
+
+  /** How far each camera's turn wanders in a second, as a standard deviation. */
+  private static final double TURN_WANDER = Math.toRadians(0.05);
 
   /** How unsure the gyro's drift starts, and how its errors wander, where they are estimated. */
   private static final PoseFilter.GyroDoubt GYRO_DOUBT =
@@ -80,13 +90,51 @@ class PoseFilterReferenceTest {
 
   private double[][] p = new double[N][N];
 
+  /** How unsure each camera's turn was before its images: its mount's, and each opening since. */
+  private final double[] turnPrior = new double[ConsideredErrors.MAX_CAMERAS];
+
   private static double ownVariance(int which) {
     return which == 0 ? TURN * TURN : which == 3 ? HEADING_SHIFT * HEADING_SHIFT : SHIFT * SHIFT;
   }
 
-  /** A camera's considered error's index in the augmented state, after the two IMUs' scales. */
+  /** A camera's error's index in the augmented state, after the two IMUs' scales. */
   private static int column(int camera, int which) {
     return 3 + 2 + PER_CAMERA * camera + which;
+  }
+
+  /** Whether an index of the augmented state is a camera's turn, which the filter estimates. */
+  private static boolean isATurn(int index) {
+    int camerasStart = column(0, 0);
+    int camerasEnd = column(ConsideredErrors.MAX_CAMERAS, 0);
+    return index >= camerasStart && index < camerasEnd && (index - camerasStart) % PER_CAMERA == 0;
+  }
+
+  private static int[] stateAt() {
+    int[] at = new int[StateLayout.STATES];
+    at[StateLayout.X] = 0;
+    at[StateLayout.Y] = 1;
+    at[StateLayout.HEADING] = 2;
+    at[StateLayout.GYRO_SCALE] = 3;
+    at[StateLayout.GYRO_DRIFT] = DRIFT;
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      at[StateLayout.turnOf(camera)] = column(camera, 0);
+    }
+    return at;
+  }
+
+  private static int[] consideredAt() {
+    int[] at = new int[N - StateLayout.STATES];
+    at[ConsideredErrors.BACKUP_SCALE] = 4;
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      at[ConsideredErrors.cameraShiftForward(camera)] = column(camera, 1);
+      at[ConsideredErrors.cameraShiftLeft(camera)] = column(camera, 2);
+      at[ConsideredErrors.cameraHeadingsShift(camera)] = column(camera, 3);
+    }
+    for (int tag = 0; tag < TAGS; tag++) {
+      at[ConsideredErrors.tagAlongX(tag)] = tagColumn(tag, 0);
+      at[ConsideredErrors.tagAlongY(tag)] = tagColumn(tag, 1);
+    }
+    return at;
   }
 
   /** A tag's placement's index in the augmented state, along x (0) or y (1). */
@@ -143,7 +191,10 @@ class PoseFilterReferenceTest {
     double across = dy;
     // The gyro's scale adds its share of the turn to the heading, and its drift its share of the
     // time; the arc is the true turn's.
-    double scaleTurn = turnedBy == YawSource.GYRO ? mean[3] * turn + mean[4] * seconds : 0;
+    double scaleTurn =
+        turnedBy == YawSource.GYRO
+            ? mean[StateLayout.GYRO_SCALE] * turn + mean[StateLayout.GYRO_DRIFT] * seconds
+            : 0;
     double trueTurn = turn + scaleTurn;
     mean[2] += scaleTurn;
     if (Math.abs(trueTurn) > 1e-9) {
@@ -176,6 +227,9 @@ class PoseFilterReferenceTest {
       int k = column(camera, 3);
       fade[k][k] = remains;
       q[k][k] = (1 - remains * remains) * p[k][k]; // back to the camera's own variance
+      // Each camera's turn wanders a little with the time.
+      int turnAt = column(camera, 0);
+      q[turnAt][turnAt] = TURN_WANDER * TURN_WANDER * seconds;
     }
     double[][] phi = multiply(fade, multiply(g, f));
     p = add(multiply(multiply(phi, p), transpose(phi)), q);
@@ -193,8 +247,16 @@ class PoseFilterReferenceTest {
   private void camera(VisionMeasurement measurement, double yawThen, int camera, int[] tags) {
     PoseCovariance noise = measurement.covariance();
     int rows = noise.hasHeading() ? 3 : 2;
-    double leverX = measurement.lever().robotToTags().getX();
-    double leverY = measurement.lever().robotToTags().getY();
+    // The camera's turn, as the estimate has it, swung back off the camera about its tags.
+    double turn = camera >= 0 ? mean[StateLayout.turnOf(camera)] : 0;
+    double solvedCameraX = measurement.lever().cameraToTags().getX();
+    double solvedCameraY = measurement.lever().cameraToTags().getY();
+    double cameraLeverX = Math.cos(turn) * solvedCameraX - Math.sin(turn) * solvedCameraY;
+    double cameraLeverY = Math.sin(turn) * solvedCameraX + Math.cos(turn) * solvedCameraY;
+    double turnedBackX = measurement.pose().getX() + solvedCameraX - cameraLeverX;
+    double turnedBackY = measurement.pose().getY() + solvedCameraY - cameraLeverY;
+    double leverX = measurement.lever().robotToTags().getX() - (solvedCameraX - cameraLeverX);
+    double leverY = measurement.lever().robotToTags().getY() - (solvedCameraY - cameraLeverY);
     // The mount's shift, forward and left, turns with the robot: as the estimate has it then.
     double cos = Math.cos(yawThen + mean[2]);
     double sin = Math.sin(yawThen + mean[2]);
@@ -204,10 +266,10 @@ class PoseFilterReferenceTest {
     h[1][1] = 1;
     h[1][2] = leverX;
     if (camera >= 0) {
-      h[0][column(camera, 0)] = -leverY;
+      h[0][column(camera, 0)] = -cameraLeverY;
       h[0][column(camera, 1)] = cos;
       h[0][column(camera, 2)] = -sin;
-      h[1][column(camera, 0)] = leverX;
+      h[1][column(camera, 0)] = cameraLeverX;
       h[1][column(camera, 1)] = sin;
       h[1][column(camera, 2)] = cos;
     }
@@ -242,10 +304,10 @@ class PoseFilterReferenceTest {
     if (camera < 0) {
       // A camera without a place: its turn and shift, new in each image, are just more noise.
       double[][] own = new double[rows][PER_CAMERA];
-      own[0][0] = -leverY;
+      own[0][0] = -cameraLeverY;
       own[0][1] = cos;
       own[0][2] = -sin;
-      own[1][0] = leverX;
+      own[1][0] = cameraLeverX;
       own[1][1] = sin;
       own[1][2] = cos;
       if (rows == 3) {
@@ -265,27 +327,43 @@ class PoseFilterReferenceTest {
     double solvedOff =
         MathUtil.angleModulus(measurement.lever().heading().getRadians() - (yawThen + mean[2]));
     double[] innovation = new double[rows];
-    innovation[0] = measurement.pose().getX() - mean[0] - solvedOff * leverY;
-    innovation[1] = measurement.pose().getY() - mean[1] + solvedOff * leverX;
+    innovation[0] = turnedBackX - mean[0] - solvedOff * leverY;
+    innovation[1] = turnedBackY - mean[1] + solvedOff * leverX;
     if (rows == 3) {
       innovation[2] =
           MathUtil.angleModulus(
-              measurement.pose().getRotation().getRadians() - (yawThen + mean[2]));
+              measurement.pose().getRotation().getRadians() - turn - (yawThen + mean[2]));
     }
     double[][] gain =
         multiply(
             multiply(p, transpose(h)), inverse(add(multiply(multiply(h, p), transpose(h)), r)));
-    // Schmidt: the considered errors are never corrected; a position alone never turns the heading;
-    // and the gyro's errors are corrected only by what corrects the heading, where they are
-    // estimated.
+    // Schmidt: the considered errors are never corrected; a position alone never turns the heading,
+    // nor the cameras' turns, unless it may; and the gyro's errors are corrected only by what
+    // corrects the heading, where they are estimated.
+    boolean leavesHeadingAlone = rows == 2 && !fixesTurnHeading;
     for (int i = FIRST_CONSIDERED; i < DRIFT; i++) {
-      for (int j = 0; j < rows; j++) {
+      boolean estimated = isATurn(i) && !leavesHeadingAlone;
+      for (int j = 0; j < rows && !estimated; j++) {
         gain[i][j] = 0;
       }
     }
-    boolean leavesHeadingAlone = rows == 2 && !fixesTurnHeading;
     if (leavesHeadingAlone) {
       gain[2][0] = gain[2][1] = 0;
+    }
+    // The cameras' turns are learned relative to one another: their average, each weighed by how
+    // sure it was before its images, is carried.
+    double allTheWeight = 0;
+    for (int each = 0; each < ConsideredErrors.MAX_CAMERAS; each++) {
+      allTheWeight += 1 / turnPrior[each];
+    }
+    for (int j = 0; j < rows; j++) {
+      double shared = 0;
+      for (int each = 0; each < ConsideredErrors.MAX_CAMERAS; each++) {
+        shared += gain[column(each, 0)][j] / turnPrior[each] / allTheWeight;
+      }
+      for (int each = 0; each < ConsideredErrors.MAX_CAMERAS; each++) {
+        gain[column(each, 0)][j] -= shared;
+      }
     }
     if (leavesHeadingAlone || !estimatesScale) {
       for (int j = 0; j < rows; j++) {
@@ -310,11 +388,11 @@ class PoseFilterReferenceTest {
             multiply(multiply(gain, r), transpose(gain)));
   }
 
-  /** Where the filter's C starts in what it stores: after P's 4 by 4. */
+  /** Where the filter's C starts in what it stores: after P. */
   private static final int P_CELLS = STATES * STATES;
 
   private final double[] kept =
-      new double[P_CELLS + STATES * CONSIDERED + 2 * ConsideredErrors.MAX_CAMERAS];
+      new double[P_CELLS + STATES * CONSIDERED + 3 * ConsideredErrors.MAX_CAMERAS];
 
   /** How far the filter is from the reference, relative to the estimate's own variances. */
   private double difference(PoseFilter filter) {
@@ -331,7 +409,7 @@ class PoseFilterReferenceTest {
       }
       for (int k = 0; k < CONSIDERED; k++) {
         double relation = kept[P_CELLS + i * CONSIDERED + k];
-        worst = Math.max(worst, Math.abs(relation - p[STATE_AT[i]][FIRST_CONSIDERED + k]) / scale);
+        worst = Math.max(worst, Math.abs(relation - p[STATE_AT[i]][CONSIDERED_AT[k]]) / scale);
       }
     }
     double moved =
@@ -340,17 +418,25 @@ class PoseFilterReferenceTest {
             Math.max(
                 Math.abs(filter.headingOffset() - mean[2]),
                 Math.max(
-                    Math.abs(filter.gyroScale() - mean[3]),
-                    Math.abs(filter.gyroDrift() - mean[4]))));
+                    Math.abs(filter.gyroScale() - mean[StateLayout.GYRO_SCALE]),
+                    Math.abs(filter.gyroDrift() - mean[StateLayout.GYRO_DRIFT]))));
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      moved =
+          Math.max(moved, Math.abs(filter.cameraTurn(camera) - mean[StateLayout.turnOf(camera)]));
+    }
     return Math.max(worst, 1e-3 * moved / Math.sqrt(scale));
   }
 
   /**
-   * A camera's turn and shift variances set afresh: falling, the error's relations to everything
-   * fall with them in proportion, which keeps the joint covariance positive.
+   * A camera's shift variances set afresh: falling, the error's relations to everything fall with
+   * them in proportion, which keeps the joint covariance positive. Its turn, which is estimated,
+   * only ever gains variance, as much as it falls short of the turn variance given.
    */
   private void setCameraVariances(int camera, double turn, double shift) {
-    setVariance(column(camera, 0), turn);
+    int turnAt = column(camera, 0);
+    double raisedBy = Math.max(0, turn - p[turnAt][turnAt]);
+    p[turnAt][turnAt] += raisedBy;
+    turnPrior[camera] += raisedBy;
     setVariance(column(camera, 1), shift);
     setVariance(column(camera, 2), shift);
   }
@@ -374,7 +460,7 @@ class PoseFilterReferenceTest {
    * considered errors' variances are the reference's.
    */
   private double leastEigenvalue(PoseFilter filter) {
-    return leastEigenvalue(filter, k -> p[FIRST_CONSIDERED + k][FIRST_CONSIDERED + k]);
+    return leastEigenvalue(filter, k -> p[CONSIDERED_AT[k]][CONSIDERED_AT[k]]);
   }
 
   private double leastEigenvalue(
@@ -416,7 +502,7 @@ class PoseFilterReferenceTest {
     for (int sequence = 0; sequence < 60; sequence++) {
       SplittableRandom random = new SplittableRandom(sequence * 7919L + 1);
       PoseFilter filter =
-          new PoseFilter(considered, TAGS, fixesTurnHeading, gyroErrors, GYRO_DOUBT);
+          new PoseFilter(considered, TAGS, fixesTurnHeading, gyroErrors, GYRO_DOUBT, TURN_WANDER);
       assertThat(filter.consideredCount()).isEqualTo(CONSIDERED);
       assertThat(filter.uncertaintyLength()).isEqualTo(kept.length);
       double start = logUniform(random, 0.01, 100);
@@ -428,11 +514,11 @@ class PoseFilterReferenceTest {
               PoseCovariance.fromStdDevs(start, start, startHeading),
               "x"),
           0.1);
+      java.util.Arrays.fill(mean, 0);
+      java.util.Arrays.fill(turnPrior, TURN * TURN);
       mean[0] = 1;
       mean[1] = 2;
       mean[2] = 0.2;
-      mean[3] = 0;
-      mean[4] = 0;
       startConsidered();
       double driftStdDev = estimatesScale ? GYRO_DOUBT.driftStdDevRadiansPerSecond() : 0;
       p[DRIFT][DRIFT] = driftStdDev * driftStdDev;
@@ -511,6 +597,13 @@ class PoseFilterReferenceTest {
           mean[0] += 0.1;
           mean[1] -= 0.1;
           setPosition(variance, 0, variance);
+        } else if (u < 0.972) {
+          // A camera knocked: its turn opened up again.
+          int camera = random.nextInt(ConsideredErrors.MAX_CAMERAS);
+          double variance = TURN * TURN * logUniform(random, 0.25, 40);
+          filter.reopenCameraTurn(camera, variance);
+          p[column(camera, 0)][column(camera, 0)] += variance;
+          turnPrior[camera] += variance;
         } else if (u < 0.975) {
           // A camera's mount doubted, or no longer: its turn and shift raised, or back down.
           int camera = random.nextInt(ConsideredErrors.MAX_CAMERAS);
@@ -538,7 +631,11 @@ class PoseFilterReferenceTest {
           }
           double[][] h = new double[1][N];
           h[0][DRIFT] = 1;
-          joseph(gain, h, new double[][] {{variance}}, new double[] {read - mean[4]});
+          joseph(
+              gain,
+              h,
+              new double[][] {{variance}},
+              new double[] {read - mean[StateLayout.GYRO_DRIFT]});
         } else {
           // What the history keeps, it gives back exactly.
           double[] stored = new double[filter.uncertaintyLength()];
@@ -604,7 +701,8 @@ class PoseFilterReferenceTest {
         filter.predict(yaw, 0.001, 0.001, 0, 0, 1e-12, 1e-14, YawSource.GYRO);
         yaw += 0.001;
       }
-      worstEigenvalue = Math.min(worstEigenvalue, leastEigenvalue(filter, k -> considered(k + 1)));
+      worstEigenvalue =
+          Math.min(worstEigenvalue, leastEigenvalue(filter, k -> considered(CONSIDERED_AT[k] - 3)));
     }
 
     assertThat(worstEigenvalue).as("least eigenvalue, over the trace").isGreaterThan(-1e-9);
@@ -623,7 +721,9 @@ class PoseFilterReferenceTest {
             : new VisionMeasurement.Lever(
                 new Rotation2d(random.nextDouble()),
                 new Translation2d(
-                    logUniform(random, 0.5, 6), new Rotation2d(6.28 * random.nextDouble())));
+                    logUniform(random, 0.5, 6), new Rotation2d(6.28 * random.nextDouble())),
+                new Translation2d(
+                    0.4 * random.nextDouble(), new Rotation2d(6.28 * random.nextDouble())));
     double correlation = 0.9 * random.nextDouble() - 0.45;
     // One to three of the seen tags, each its own share.
     int count = 1 + random.nextInt(3);

@@ -48,7 +48,11 @@ final class OdometryHistory {
     static final Motion NONE = new Motion(Translation2d.ZERO, 0);
   }
 
-  private final int capacity;
+  /** How many steps it can keep now: it grows, up to {@link #mostCapacity}, if it must. */
+  private int capacity;
+
+  /** The most steps it ever keeps, before each new one drops the oldest. */
+  private final int mostCapacity;
 
   /** The slot of the oldest step kept. */
   private int oldestSlot;
@@ -59,31 +63,31 @@ final class OdometryHistory {
   // What each step was, fixed when it was added. Every array is indexed by slot.
 
   /** When each step ended, on the robot's clock. */
-  private final long[] endTimeNanos;
+  private long[] endTimeNanos;
 
   /**
    * How far the wheels carried the robot over each step, forward and to the left in the robot's
    * frame as the step began, with whatever the estimator discounted for a tilt already taken off.
    */
-  private final double[] travelForwardMeters;
+  private double[] travelForwardMeters;
 
-  private final double[] travelLeftMeters;
+  private double[] travelLeftMeters;
 
   /** How far the wheels' disagreement with each other may have put each step's travel off. */
-  private final double[] wheelResidualMeters;
+  private double[] wheelResidualMeters;
 
   /**
    * The position variance each step adds beyond what its distance and turning add, for slip, tilt
    * and collisions. It is worked out when the step arrives and kept, so a replay weighs the step
    * exactly as it was first weighed.
    */
-  private final double[] addedPositionVariance;
+  private double[] addedPositionVariance;
 
   /** What turned the robot over each step: an IMU, or the wheels standing in for one. */
-  private final YawSource[] turnedBy;
+  private YawSource[] turnedBy;
 
   /** The unwrapped yaw as each step ended, in radians. */
-  private final double[] yawAfterRadians;
+  private double[] yawAfterRadians;
 
   /**
    * How far the gyro had turned the robot, in all, as each step ended, in radians: the sum of the
@@ -91,23 +95,31 @@ final class OdometryHistory {
    * error misreads a share of exactly this, so the difference between two steps' sums is what the
    * scale has to say about the heading between them.
    */
-  private final double[] gyroTurnAfterRadians;
+  private double[] gyroTurnAfterRadians;
 
   /**
    * For how long the gyro had turned the robot, in all, as each step ended, in seconds: the sum of
    * the durations of the steps the gyro turned. The gyro's drift adds to the heading over exactly
    * this.
    */
-  private final double[] gyroSecondsAfter;
+  private double[] gyroSecondsAfter;
 
   /**
    * The gyro's drift as a stretch of standing still that ended with each step read it, in radians a
    * second, and that reading's variance ({@link GyroAtRest}). Not a number for a step no such
    * stretch ended with, which is nearly every one.
    */
-  private final double[] driftSeenAtRest;
+  private double[] driftSeenAtRest;
 
-  private final double[] driftSeenVariance;
+  private double[] driftSeenVariance;
+
+  /**
+   * How far each camera's turn on its mount was opened up again as each step ended, as the variance
+   * added to it ({@link PoseFilter#reopenCameraTurn}), in radians squared: its mount may have been
+   * knocked. {@link ConsideredErrors#MAX_CAMERAS} for each step, by the camera's place, and zero
+   * for nearly every one.
+   */
+  private double[] turnReopenedBy;
 
   /**
    * How far the wheels and the gyro alone had carried the robot over the field, in all, as each
@@ -115,40 +127,67 @@ final class OdometryHistory {
    * predicted it, counted from when the history started. No camera's correction is in it, so the
    * difference between two steps' sums is how the robot moved between them by odometry alone.
    */
-  private final double[] carriedXAfter;
+  private double[] carriedXAfter;
 
-  private final double[] carriedYAfter;
+  private double[] carriedYAfter;
 
   /**
    * How unsure odometry alone had become of where the robot is, in all, as each step ended, as a
    * variance along each axis: the sum of the position variance every step added, for its distance,
    * its turning, and whatever made its wheels suspect, counted from when the history started.
    */
-  private final double[] carriedVarianceAfter;
+  private double[] carriedVarianceAfter;
 
   // The filter's state once each step had been applied. A replay rewrites these.
 
-  private final double[] filterXAfter;
-  private final double[] filterYAfter;
-  private final double[] filterHeadingOffsetAfter;
-  private final double[] filterGyroScaleAfter;
-  private final double[] filterGyroDriftAfter;
+  private double[] filterXAfter;
+  private double[] filterYAfter;
+  private double[] filterHeadingOffsetAfter;
+  private double[] filterGyroScaleAfter;
+  private double[] filterGyroDriftAfter;
 
   /**
    * The filter's uncertainty after each step, one step after another: for each slot, the {@link
    * #uncertaintyLength} numbers that {@link PoseFilter#copyUncertaintyTo} writes.
    */
-  private final double[] filterUncertaintyAfter;
+  private double[] filterUncertaintyAfter;
 
   private final int uncertaintyLength;
 
   /**
+   * A history that keeps up to a number of steps from the start.
+   *
    * @param capacity how many steps it keeps before each new one drops the oldest
    * @param uncertaintyLength how many numbers the filter's uncertainty takes to store ({@link
    *     PoseFilter#uncertaintyLength()})
    */
   OdometryHistory(int capacity, int uncertaintyLength) {
+    this(capacity, capacity, uncertaintyLength);
+  }
+
+  /**
+   * A history with room for some steps at first, which grows if it must.
+   *
+   * <p>The filter's uncertainty is most of what each step keeps, thousands of numbers, so room for
+   * steps that never come costs megabytes. The history starts with room for as many steps as the
+   * usual odometry rate brings within its time, and doubles its room, up to the most, only if
+   * odometry runs faster. Growing allocates, once for each doubling; nothing else does.
+   *
+   * @param capacity how many steps it has room for at first
+   * @param mostCapacity the most steps it ever keeps, before each new one drops the oldest
+   * @param uncertaintyLength how many numbers the filter's uncertainty takes to store ({@link
+   *     PoseFilter#uncertaintyLength()})
+   */
+  OdometryHistory(int capacity, int mostCapacity, int uncertaintyLength) {
+    if (capacity < 2 || mostCapacity < capacity) {
+      throw new IllegalArgumentException(
+          "room for at least two steps, and no more at first than at most: "
+              + capacity
+              + ", "
+              + mostCapacity);
+    }
     this.capacity = capacity;
+    this.mostCapacity = mostCapacity;
     this.uncertaintyLength = uncertaintyLength;
     endTimeNanos = new long[capacity];
     travelForwardMeters = new double[capacity];
@@ -161,6 +200,7 @@ final class OdometryHistory {
     gyroSecondsAfter = new double[capacity];
     driftSeenAtRest = new double[capacity];
     driftSeenVariance = new double[capacity];
+    turnReopenedBy = new double[capacity * ConsideredErrors.MAX_CAMERAS];
     carriedXAfter = new double[capacity];
     carriedYAfter = new double[capacity];
     carriedVarianceAfter = new double[capacity];
@@ -187,6 +227,11 @@ final class OdometryHistory {
     carriedXAfter[oldestSlot] = 0;
     carriedYAfter[oldestSlot] = 0;
     carriedVarianceAfter[oldestSlot] = 0;
+    java.util.Arrays.fill(
+        turnReopenedBy,
+        oldestSlot * ConsideredErrors.MAX_CAMERAS,
+        (oldestSlot + 1) * ConsideredErrors.MAX_CAMERAS,
+        0);
   }
 
   /**
@@ -211,7 +256,11 @@ final class OdometryHistory {
       YawSource source,
       double yawRadians) {
     if (stepCount == capacity) {
-      dropOldestStep();
+      if (capacity < mostCapacity) {
+        grow();
+      } else {
+        dropOldestStep();
+      }
     }
     int previous = slotOf(newestStep());
     boolean gyroTurnedIt = source == YawSource.GYRO;
@@ -230,6 +279,11 @@ final class OdometryHistory {
     gyroTurnAfterRadians[slot] = gyroTurnAfterRadians[previous] + gyroTurn;
     gyroSecondsAfter[slot] = gyroSecondsAfter[previous] + gyroSeconds;
     driftSeenAtRest[slot] = Double.NaN;
+    java.util.Arrays.fill(
+        turnReopenedBy,
+        slot * ConsideredErrors.MAX_CAMERAS,
+        (slot + 1) * ConsideredErrors.MAX_CAMERAS,
+        0);
     return newestStep();
   }
 
@@ -254,6 +308,22 @@ final class OdometryHistory {
   /** That reading's variance, in (radians a second) squared. */
   double driftSeenVariance(int step) {
     return driftSeenVariance[slotOf(step)];
+  }
+
+  /**
+   * Notes that a camera's turn was opened up again as the newest step ended, so a replay opens it
+   * again at the same step, by as much.
+   *
+   * @param camera the camera's place
+   * @param variance the variance added to its turn, in radians squared
+   */
+  void reopenedTurnAtNewestStep(int camera, double variance) {
+    turnReopenedBy[slotOf(newestStep()) * ConsideredErrors.MAX_CAMERAS + camera] += variance;
+  }
+
+  /** How far a camera's turn was opened up again as a step ended: zero if it was not. */
+  double turnReopenedBy(int step, int camera) {
+    return turnReopenedBy[slotOf(step) * ConsideredErrors.MAX_CAMERAS + camera];
   }
 
   /**
@@ -560,5 +630,57 @@ final class OdometryHistory {
   /** Where a step's values sit in the arrays. */
   private int slotOf(int step) {
     return (oldestSlot + step) % capacity;
+  }
+
+  /**
+   * Doubles the room for steps, up to the most it keeps, with every step kept where it was in
+   * order: the oldest moves to the first slot, and the rest follow it.
+   */
+  private void grow() {
+    int grown = Math.min(2 * capacity, mostCapacity);
+    endTimeNanos = grown(endTimeNanos, new long[grown], 1);
+    travelForwardMeters = grown(travelForwardMeters, grown);
+    travelLeftMeters = grown(travelLeftMeters, grown);
+    wheelResidualMeters = grown(wheelResidualMeters, grown);
+    addedPositionVariance = grown(addedPositionVariance, grown);
+    turnedBy = grown(turnedBy, new YawSource[grown], 1);
+    yawAfterRadians = grown(yawAfterRadians, grown);
+    gyroTurnAfterRadians = grown(gyroTurnAfterRadians, grown);
+    gyroSecondsAfter = grown(gyroSecondsAfter, grown);
+    driftSeenAtRest = grown(driftSeenAtRest, grown);
+    driftSeenVariance = grown(driftSeenVariance, grown);
+    turnReopenedBy =
+        grown(
+            turnReopenedBy,
+            new double[grown * ConsideredErrors.MAX_CAMERAS],
+            ConsideredErrors.MAX_CAMERAS);
+    carriedXAfter = grown(carriedXAfter, grown);
+    carriedYAfter = grown(carriedYAfter, grown);
+    carriedVarianceAfter = grown(carriedVarianceAfter, grown);
+    filterXAfter = grown(filterXAfter, grown);
+    filterYAfter = grown(filterYAfter, grown);
+    filterHeadingOffsetAfter = grown(filterHeadingOffsetAfter, grown);
+    filterGyroScaleAfter = grown(filterGyroScaleAfter, grown);
+    filterGyroDriftAfter = grown(filterGyroDriftAfter, grown);
+    filterUncertaintyAfter =
+        grown(filterUncertaintyAfter, new double[grown * uncertaintyLength], uncertaintyLength);
+    oldestSlot = 0;
+    capacity = grown;
+  }
+
+  private double[] grown(double[] kept, int grown) {
+    return grown(kept, new double[grown], 1);
+  }
+
+  /**
+   * Copies the steps kept into a larger array, in order from the oldest, which goes first.
+   *
+   * @param perSlot how many of the array's numbers each slot holds
+   */
+  private <A> A grown(A kept, A into, int perSlot) {
+    for (int step = 0; step < stepCount; step++) {
+      System.arraycopy(kept, slotOf(step) * perSlot, into, step * perSlot, perSlot);
+    }
+    return into;
   }
 }

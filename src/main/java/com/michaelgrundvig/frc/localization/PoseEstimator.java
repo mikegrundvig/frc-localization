@@ -1,6 +1,8 @@
 package com.michaelgrundvig.frc.localization;
 
+import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -17,13 +19,16 @@ import org.wpilib.math.util.MathUtil;
 /**
  * Where the robot is: odometry, corrected by camera measurements, with the gyro owning heading.
  *
- * <p>The state is the robot's position, a heading offset, and the gyro's two errors, its scale and
- * its drift: the field heading is the gyro's reading plus the offset, so the gyro keeps all
- * short-term authority over heading, and cameras correct what it gets wrong, the share of every
- * turn its scale misreads and what it drifts each second. A covariance holds the uncertainty of all
- * of them and how they relate: an unsure heading makes every meter driven add position uncertainty
- * sideways, an unsure scale makes every turn add heading uncertainty, and an unsure drift every
- * second.
+ * <p>The state is the robot's position, a heading offset, the gyro's two errors, its scale and its
+ * drift, and each camera's turn on its mount: the field heading is the gyro's reading plus the
+ * offset, so the gyro keeps all short-term authority over heading, and cameras correct what it gets
+ * wrong, the share of every turn its scale misreads and what it drifts each second. Each camera's
+ * turn starts as unsure as its mount's tolerance and is learned from its images relative to the
+ * other cameras' ({@link PoseFilter}); a camera whose headings turn at once, as a knocked one's do,
+ * has its turn opened up and learned anew ({@link MountKnocks}). A covariance holds the uncertainty
+ * of all of them and how they relate: an unsure heading makes every meter driven add position
+ * uncertainty sideways, an unsure scale makes every turn add heading uncertainty, and an unsure
+ * drift every second.
  *
  * <p><b>Odometry.</b> Each odometry step predicts: the wheels' motion, along the arc the gyro
  * turned through, moves the position, and the uncertainty grows with the distance driven, the
@@ -67,11 +72,21 @@ public final class PoseEstimator {
   /** The history has room for its seconds of odometry at up to this many steps a second. */
   private static final int MOST_STEPS_PER_SECOND = 1000;
 
+  /**
+   * And starts with room for this many, growing only if odometry runs faster: a robot's odometry
+   * runs at 250 steps a second, and a quarter more leaves room for a loop that brings a step or two
+   * more than its share.
+   */
+  private static final int USUAL_STEPS_PER_SECOND = 313;
+
   private static final int FEWEST_STEPS_KEPT = 16;
 
   private static final double RADIANS_PER_TURN = 2 * Math.PI;
   private static final double SECONDS_PER_MINUTE = 60;
   private static final double PERCENT = 100;
+
+  /** How long a match lasts, in seconds: 2 minutes 30 seconds. */
+  private static final double MATCH_SECONDS = 150;
 
   private final EstimatorConfig config;
   private final Predicate<Translation2d> onField;
@@ -88,9 +103,18 @@ public final class PoseEstimator {
   /** And when the wheels turned it, which drift far faster. */
   private final double wheelHeadingVariancePerRadian;
 
-  // What a camera's turn and shift on its mount are taken to be before any doubt about its mount.
-  private final double usualCameraTurnVariance;
-  private final double usualCameraShiftVariance;
+  /**
+   * How unsure each camera's turn on its mount starts, by its place, as a variance in radians
+   * squared: from its mount's tolerance. A sign that it was knocked opens its turn up by at least
+   * this again.
+   */
+  private final double[] cameraTurnVariance = new double[ConsideredErrors.MAX_CAMERAS];
+
+  /**
+   * How unsure each camera's shift on its mount is, by its place, along each axis, before any doubt
+   * about its mount: from its mount's tolerance and what its solves repeat beyond it.
+   */
+  private final double[] cameraShiftVariance = new double[ConsideredErrors.MAX_CAMERAS];
 
   private final long historyNanos;
   private final long futureToleranceNanos;
@@ -159,6 +183,15 @@ public final class PoseEstimator {
   /** Whether each camera's measurements keep landing to one side of the others'. */
   private final CameraWatch watch;
 
+  /** Whether a camera's mount may have been knocked, so its turn must be learned anew. */
+  private final MountKnocks knocks;
+
+  /**
+   * How far this update found each camera's turn must be opened up, by a sign of a knock, as the
+   * variance to add to it, by the camera's place: zero for none.
+   */
+  private final double[] turnsToReopen = new double[ConsideredErrors.MAX_CAMERAS];
+
   /**
    * Where odometry alone puts the robot at the moment of the measurement being applied: the
    * estimate as it stood at the start of the history, carried on by the wheels and the gyro. Set by
@@ -219,6 +252,9 @@ public final class PoseEstimator {
   private record Agreement(long time, double meters) {}
 
   /**
+   * An estimator that takes each camera, as it first gives a measurement, to sit as a mount
+   * measured from CAD and checked does ({@link CameraConfig.MountTolerance#MEASURED}).
+   *
    * @param config how to weigh the sources
    * @param onField whether a point is on the field: measurements off it are rejected
    * @param tags the field's tags: each one's placement is kept apart, the same for every camera
@@ -232,6 +268,27 @@ public final class PoseEstimator {
       Predicate<Translation2d> onField,
       Collection<Integer> tags,
       PoseReset initial) {
+    this(config, onField, tags, List.of(), initial);
+  }
+
+  /**
+   * @param config how to weigh the sources
+   * @param onField whether a point is on the field: measurements off it are rejected
+   * @param tags the field's tags: each one's placement is kept apart, the same for every camera
+   *     that sees it and every time it's seen. A measurement from any other counts its placement as
+   *     new in each image ({@link #tagsWithoutPlaces})
+   * @param cameras the robot's cameras, each known by its name: its turn on its mount starts as
+   *     unsure as its mount's tolerance says. A camera not among them that gives a measurement is
+   *     taken to sit as a measured mount does ({@link CameraConfig.MountTolerance#MEASURED})
+   * @param initial where the robot is at the start, and how sure that is; for a placeholder (the
+   *     robot not placed yet) give a large uncertainty, and the first camera measurement wins
+   */
+  public PoseEstimator(
+      EstimatorConfig config,
+      Predicate<Translation2d> onField,
+      Collection<Integer> tags,
+      List<CameraConfig> cameras,
+      PoseReset initial) {
     this.config = config;
     this.onField = onField;
     this.initial = initial;
@@ -241,8 +298,9 @@ public final class PoseEstimator {
         square(Math.toRadians(config.headingDriftDegreesPerMinute())) / SECONDS_PER_MINUTE;
     imuHeadingVariancePerRadian =
         square(Math.toRadians(config.headingNoiseDegreesPerTurn())) / RADIANS_PER_TURN;
-    usualCameraTurnVariance = square(Math.toRadians(config.cameraTurnStdDevDegrees()));
-    usualCameraShiftVariance = square(config.cameraShiftStdDevMeters());
+    CameraConfig.MountTolerance measured = CameraConfig.MountTolerance.MEASURED;
+    Arrays.fill(cameraTurnVariance, square(measured.turnStdDevRadians()));
+    Arrays.fill(cameraShiftVariance, shiftVariance(config, measured));
     wheelHeadingVariancePerRadian =
         square(Math.toRadians(config.wheelHeadingStdDevDegreesPerTurn())) / RADIANS_PER_TURN;
     historyNanos = Timestamps.fromSeconds(config.historySeconds());
@@ -253,6 +311,7 @@ public final class PoseEstimator {
     wheelDoubt = new WheelDoubt(config);
     places = new ErrorPlaces(tags);
     recovery = new Recovery(config);
+    knocks = new MountKnocks(config.cameraWatchMeasurements());
     gyroAtRest =
         new GyroAtRest(
             headingVariancePerSecond,
@@ -260,16 +319,16 @@ public final class PoseEstimator {
     watch =
         new CameraWatch(
             config.cameraWatchMeasurements(),
-            Math.toRadians(config.cameraTurnStdDevDegrees()),
-            config.cameraShiftStdDevMeters(),
+            measured.turnStdDevRadians(),
+            Math.sqrt(shiftVariance(config, measured)),
             config.cameraClockStdDevSeconds());
     filter =
         new PoseFilter(
             new PoseFilter.Considered(
                 Math.toRadians(config.headingStdDevDegreesPerTurn()) / RADIANS_PER_TURN,
                 Math.toRadians(config.backupHeadingStdDevDegreesPerTurn()) / RADIANS_PER_TURN,
-                Math.toRadians(config.cameraTurnStdDevDegrees()),
-                config.cameraShiftStdDevMeters(),
+                measured.turnStdDevRadians(),
+                Math.sqrt(shiftVariance(config, measured)),
                 Math.toRadians(config.cameraShiftStdDevDegrees()),
                 config.tagPlacementStdDevMeters(),
                 config.cameraShiftCorrelationMeters(),
@@ -279,12 +338,48 @@ public final class PoseEstimator {
             config.gyroErrors() == EstimatorConfig.GyroErrors.ESTIMATED
                 ? PoseFilter.GyroErrors.ESTIMATED
                 : PoseFilter.GyroErrors.CONSIDERED,
-            gyroDoubt(config));
-    int stepsInTheHistory = (int) Math.ceil(config.historySeconds() * MOST_STEPS_PER_SECOND) + 1;
+            gyroDoubt(config),
+            measured.turnStdDevRadians() / Math.sqrt(MATCH_SECONDS));
+    int mostSteps = (int) Math.ceil(config.historySeconds() * MOST_STEPS_PER_SECOND) + 1;
+    int usualSteps = (int) Math.ceil(config.historySeconds() * USUAL_STEPS_PER_SECOND) + 1;
     history =
         new OdometryHistory(
-            Math.max(FEWEST_STEPS_KEPT, stepsInTheHistory), filter.uncertaintyLength());
+            Math.max(FEWEST_STEPS_KEPT, usualSteps),
+            Math.max(FEWEST_STEPS_KEPT, mostSteps),
+            filter.uncertaintyLength());
+    for (CameraConfig camera : cameras) {
+      startMount(camera.name(), camera.mountTolerance());
+    }
+    filter.cameraCount(places.placedCameraCount());
     filter.set(initial, yaw);
+  }
+
+  /**
+   * Gives a camera its place, and starts its mount as unsure as its tolerance says.
+   *
+   * <p>The turn starts with the variance of a turn drawn evenly within the tolerance. It may then
+   * wander, as a mount settles under a match's driving and contact, by as much again over a match:
+   * so after two and a half minutes without a word from the camera, its turn is as unsure as when
+   * it was mounted. Its shift adds the tolerance's offset to what the camera's solves repeat beyond
+   * its mount ({@link EstimatorConfig#cameraShiftStdDevMeters}).
+   */
+  private void startMount(String name, CameraConfig.MountTolerance tolerance) {
+    int camera = places.cameraPlace(name);
+    if (!ConsideredErrors.hasPlace(camera)) {
+      return;
+    }
+    cameraTurnVariance[camera] = square(tolerance.turnStdDevRadians());
+    cameraShiftVariance[camera] = shiftVariance(config, tolerance);
+    filter.setCameraMount(
+        camera,
+        cameraTurnVariance[camera],
+        cameraTurnVariance[camera] / MATCH_SECONDS,
+        cameraShiftVariance[camera]);
+  }
+
+  /** How unsure a camera's shift is along each axis: its mount's offset, and its solves' beyond. */
+  private static double shiftVariance(EstimatorConfig config, CameraConfig.MountTolerance mount) {
+    return square(mount.offsetStdDevMeters()) + square(config.cameraShiftStdDevMeters());
   }
 
   /**
@@ -647,6 +742,7 @@ public final class PoseEstimator {
     if (!usable.isEmpty()) {
       replay(usable, decisions);
     }
+    reopenTheTurnsOfKnockedCameras();
     recoverIfTheCamerasAgree();
     applyMountDoubts();
     if (started) {
@@ -737,6 +833,7 @@ public final class PoseEstimator {
       }
       predictThrough(step, predictedUpTo, 1);
       learnTheDriftSeenOver(step);
+      reopenTheTurnsReopenedAt(step);
       history.store(step, filter);
     }
     // Anything left is at the starting step itself, which happens only when the history is a single
@@ -763,6 +860,7 @@ public final class PoseEstimator {
       ReplayedMeasurement replayed, double yawThen, List<VisionDecision> decisions) {
     VisionMeasurement measurement = replayed.applied().measurement();
     int camera = places.cameraPlace(measurement.camera());
+    filter.cameraCount(places.placedCameraCount());
     int[] tagPlaces = places.tagPlaces(measurement.tagIds());
     double headingThen = yawThen + filter.headingOffset();
     // A camera the watch has in doubt counts for less by that doubt, as more noise in each of its
@@ -817,6 +915,9 @@ public final class PoseEstimator {
       // The watch is given the measurement's own miss, as it was before anything was taken off,
       // from where odometry alone puts the robot: the innovation is the measurement, less what
       // was taken off, less the estimate, so both are added back.
+      if (ConsideredErrors.hasPlace(camera)) {
+        watch.allowTurn(camera, square(filter.cameraTurnStdDev(camera)));
+      }
       watch.accepted(
           camera,
           replayed.time(),
@@ -871,11 +972,26 @@ public final class PoseEstimator {
               measurement, Verdict.GATED, innovation.distanceMeters(), chiSquared, gate));
       return false;
     }
+    watchForAKnock(places.cameraPlace(measurement.camera()), innovation);
     noteAcceptance(replayed, innovation);
     decisions.add(
         new VisionDecision(
             measurement, Verdict.ACCEPTED, innovation.distanceMeters(), chiSquared, gate));
     return true;
+  }
+
+  /**
+   * Hands an accepted measurement's heading, if it has one of its own, to the watch for a knocked
+   * mount ({@link MountKnocks}). If the camera's headings now stand clear of where the estimate has
+   * them, its turn is opened up by its mount's tolerance and by how far its headings have turned.
+   */
+  private void watchForAKnock(int camera, PoseFilter.Innovation innovation) {
+    double headingsTurnedBy =
+        knocks.headingMissed(
+            camera, innovation.headingRadians(), filter.cameraHeadingVariance(camera));
+    if (headingsTurnedBy > 0) {
+      reopenAfterThisUpdate(camera, cameraTurnVariance[camera] + headingsTurnedBy);
+    }
   }
 
   /** Counts a rejection, and hands recovery what it needs to judge whether the cameras agree. */
@@ -908,6 +1024,51 @@ public final class PoseEstimator {
     motionEvidence.restedOnCamera(replayed.time());
     agreements.add(new Agreement(replayed.time(), innovation.distanceMeters()));
     placed = true;
+  }
+
+  /**
+   * Opens up again the turn of each camera this update found a sign of a knock for ({@link
+   * MountKnocks}), at the newest step. The history keeps that it did, so that a replay from before
+   * opens it again at the same step. What the watch on the cameras judged of the camera's mount is
+   * forgotten with it: its misses were judged against the turn it had.
+   */
+  private void reopenTheTurnsOfKnockedCameras() {
+    if (!started) {
+      return;
+    }
+    boolean anyReopened = false;
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      double variance = turnsToReopen[camera];
+      if (variance > 0) {
+        filter.reopenCameraTurn(camera, variance);
+        history.reopenedTurnAtNewestStep(camera, variance);
+        watch.forgetMount(camera);
+        turnsToReopen[camera] = 0;
+        anyReopened = true;
+      }
+    }
+    if (anyReopened) {
+      history.store(history.newestStep(), filter);
+    }
+  }
+
+  /**
+   * Notes that a camera's turn is to be opened up by a variance, once this update's replay ends.
+   */
+  private void reopenAfterThisUpdate(int camera, double variance) {
+    if (ConsideredErrors.hasPlace(camera)) {
+      turnsToReopen[camera] = Math.max(turnsToReopen[camera], variance);
+    }
+  }
+
+  /** Opens up again, in a replay, the cameras' turns that were opened up as a step ended. */
+  private void reopenTheTurnsReopenedAt(int step) {
+    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
+      double variance = history.turnReopenedBy(step, camera);
+      if (variance > 0) {
+        filter.reopenCameraTurn(camera, variance);
+      }
+    }
   }
 
   /**
@@ -981,8 +1142,8 @@ public final class PoseEstimator {
       double turnRadians = doubt.tagDistanceMeters() > 0 ? meters / doubt.tagDistanceMeters() : 0;
       filter.setCameraVariances(
           camera,
-          usualCameraTurnVariance + turnRadians * turnRadians,
-          usualCameraShiftVariance + meters * meters);
+          cameraTurnVariance[camera] + turnRadians * turnRadians,
+          cameraShiftVariance[camera] + meters * meters);
     }
     mountDoubts.clear();
     history.store(history.newestStep(), filter);
@@ -1096,6 +1257,23 @@ public final class PoseEstimator {
    */
   public double cameraLateSeconds(String camera) {
     return watch.lateSeconds(places.cameraPlace(camera));
+  }
+
+  /**
+   * How far the estimator takes a camera to be turned on its mount, in degrees, counterclockwise:
+   * what it has learned of the camera's turn from its images. Zero for a camera it has no place
+   * for, and for one it has heard nothing from.
+   */
+  public double cameraTurnDegrees(String camera) {
+    return Math.toDegrees(filter.cameraTurn(places.cameraPlace(camera)));
+  }
+
+  /**
+   * How sure that is, as a standard deviation, in degrees: its mount's tolerance until its images
+   * say more. NaN for a camera it has no place for, whose turn it takes as new in every image.
+   */
+  public double cameraTurnStdDevDegrees(String camera) {
+    return Math.toDegrees(filter.cameraTurnStdDev(places.cameraPlace(camera)));
   }
 
   /** The current pose: cheap, for driving every loop. */

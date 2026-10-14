@@ -102,6 +102,11 @@ final class ErrorPlaces {
     return ConsideredErrors.NO_PLACE;
   }
 
+  /** How many cameras have places: those the filter keeps apart, places 0 up. */
+  int placedCameraCount() {
+    return cameraPlaces.size();
+  }
+
   /** Every camera asked about, those with places first, each group in the order they came. */
   List<String> cameras() {
     List<String> cameras = new ArrayList<>(cameraPlaces.keySet());

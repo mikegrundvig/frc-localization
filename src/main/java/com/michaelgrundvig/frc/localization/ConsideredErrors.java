@@ -8,9 +8,8 @@ package com.michaelgrundvig.frc.localization;
  *
  * <ol>
  *   <li>the backup IMU's scale;
- *   <li>four columns for each of {@link #MAX_CAMERAS} cameras: the camera's turn on its mount, its
- *       shift on its mount along the robot's forward, the same along the robot's left, and its
- *       headings' shift;
+ *   <li>three columns for each of {@link #MAX_CAMERAS} cameras: the camera's shift on its mount
+ *       along the robot's forward, the same along the robot's left, and its headings' shift;
  *   <li>two columns for each of the field's tags: the tag's placement along the field's x, and
  *       along its y.
  * </ol>
@@ -19,13 +18,17 @@ package com.michaelgrundvig.frc.localization;
  * gives each camera as it first appears and each field tag at the start. One the estimator has no
  * place for is given {@link #NO_PLACE}, and has no columns.
  *
- * <p>The gyro's scale is not among them. It is a value of the filter's state ({@link
- * StateLayout#GYRO_SCALE}), because the filter can estimate it.
+ * <p>The gyro's scale and drift are not among them, and neither is a camera's turn on its mount.
+ * They are values of the filter's state ({@link StateLayout}), because the filter can estimate
+ * them.
  */
 final class ConsideredErrors {
   private ConsideredErrors() {}
 
-  /** The most cameras whose errors the filter keeps apart. Any more are treated as independent. */
+  /**
+   * The most cameras whose errors the filter keeps apart, and whose turns it estimates. Any more
+   * are treated as independent.
+   */
   static final int MAX_CAMERAS = 8;
 
   /** The place of a camera or tag the filter keeps no columns for. */
@@ -37,7 +40,7 @@ final class ConsideredErrors {
   static final int BACKUP_SCALE = 0;
 
   private static final int IMU_COLUMNS = 1;
-  private static final int COLUMNS_PER_CAMERA = 4;
+  private static final int COLUMNS_PER_CAMERA = 3;
   private static final int COLUMNS_PER_TAG = 2;
 
   /** How many columns there are for a field with this many tags. */
@@ -55,20 +58,16 @@ final class ConsideredErrors {
     return column >= 0;
   }
 
-  static int cameraTurn(int camera) {
+  static int cameraShiftForward(int camera) {
     return IMU_COLUMNS + COLUMNS_PER_CAMERA * camera;
   }
 
-  static int cameraShiftForward(int camera) {
-    return cameraTurn(camera) + 1;
-  }
-
   static int cameraShiftLeft(int camera) {
-    return cameraTurn(camera) + 2;
+    return cameraShiftForward(camera) + 1;
   }
 
   static int cameraHeadingsShift(int camera) {
-    return cameraTurn(camera) + 3;
+    return cameraShiftForward(camera) + 2;
   }
 
   static int tagAlongX(int tag) {

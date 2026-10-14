@@ -31,11 +31,11 @@ class PoseEstimatorTest {
 
   /**
    * Cameras whose images' errors are each new, nothing repeating: the textbook filter, so a test
-   * can work its numbers out by hand. (PoseFilterTest covers what repeats.)
+   * can work its numbers out by hand. (PoseFilterTest covers what repeats.) A robot made with it,
+   * or with a configuration built from it, has its cameras' mounts exact ({@link Robot}).
    */
   private static final EstimatorConfig TEXTBOOK =
       EstimatorConfigBuilder.builder(EstimatorConfig.DEFAULTS)
-          .cameraTurnStdDevDegrees(0)
           .cameraShiftStdDevMeters(0)
           .cameraShiftStdDevDegrees(0)
           .tagPlacementStdDevMeters(0)
@@ -47,8 +47,16 @@ class PoseEstimatorTest {
     long time = T0;
     double gyroYaw = 0.7; // the gyro started somewhere arbitrary
 
+    /**
+     * A robot whose cameras, front, left, right, sound and knocked, are mounted exactly where the
+     * configuration repeats nothing of its own (the textbook's), and otherwise as a measured mount
+     * is.
+     */
     Robot(EstimatorConfig config, PoseReset start) {
-      estimator = new PoseEstimator(config, point -> field(point), TAGS, start);
+      boolean textbook = config.cameraShiftStdDevMeters() == 0;
+      List<com.michaelgrundvig.frc.world.robot.CameraConfig> cameras =
+          textbook ? TestCameras.exact("front", "left", "right", "sound", "knocked") : List.of();
+      estimator = new PoseEstimator(config, point -> field(point), TAGS, cameras, start);
       estimator.addOdometry(time, new BodyMotion(0, 0, 0, 0), gyroYaw, YawSource.GYRO);
     }
 
