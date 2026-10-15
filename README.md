@@ -85,8 +85,30 @@ Every localizer is handed the same measurements. None sees an image.
 estimate, recovers when the cameras agree against odometry (two cameras, two tags, or a camera and
 a sign from the IMU that the robot was moved, never one camera repeating one tag), lowers the
 wheels' trust when they slip, and keeps an honest uncertainty. It estimates the gyro's scale and
-drift, and watches each camera against the others for one knocked on its mount or stamped late. It
-reports every option.
+drift, learns each camera's turn on its mount as the robot drives, and watches each camera against
+the others for one knocked on its mount or stamped late. It reports every option.
+
+**Cameras' turns on their mounts.** A camera turned a degree from where the robot's description
+says puts every tag, and so the robot, a degree round: 5 cm at 3 m, the same way in every image,
+and every heading it gives a degree off. The estimator keeps each camera's turn in its state,
+starting as unsure as the camera's `mountTolerance` (5 mm and 1° unless the robot says otherwise),
+and learns it from the camera's images:
+
+- No single image tells a camera's turn from a heading error: the image sees both alike. The gyro
+  carries the heading from one camera's images to the next's, so how each camera's turn differs
+  from the others' is learned as the robot drives and turns.
+- What every camera's turn shares, only the wheels could tell from the heading, by how the robot
+  travels against where the cameras put it, and a wheel zeroed a few degrees off says the same
+  thing wrongly. So that is carried, never corrected: its doubt, as wide as the mounts' tolerances
+  allow together, stays in the heading's.
+- A camera whose headings turn all at once, as a knocked camera's do, beyond what its noise and the
+  estimate's doubt explain, has its turn opened up again and relearned.
+- A shove, a wheel's slip, a misread tag or a tag off the layout moves where a camera puts the
+  robot, not the camera's own heading, and is not learned as a turn: the scenario tests
+  (`MountTurnTest`) check each.
+
+It learns the turn about the vertical only. A camera shifted or tilted on its mount is carried as
+before, as an error it repeats in every image.
 
 **`WpilibLocalizer`** is WPILib's `SwerveDrivePoseEstimator`, fed as the default one is: every
 wheel reading, and the pipeline's measurements with their standard deviations. It keeps the
@@ -187,11 +209,16 @@ What it found, in simulation only:
 - In clean driving the two are roughly equal. Both hold the pose to about a centimeter.
 - The default localizer is better against bad camera data, such as a camera that keeps misreading
   a tag, and against wheels that slip.
-- With the gyro reading wrong, or a camera knocked on its mount or stamped late, the two are
-  within a centimeter of each other. The default localizer used to lose there. It now estimates
-  the gyro's scale and drift, and takes off what a knocked or late camera puts its measurements
-  off by. The simulator's gyro and cameras are simpler than real ones, so this is the result to
-  trust least.
+- With the gyro reading wrong, or a camera knocked or turned on its mount or stamped late, the two
+  are within a centimeter of each other. The default localizer used to lose there. It now
+  estimates the gyro's scale and drift and each camera's turn on its mount, and takes off what a
+  late camera puts its measurements off by. A camera turned 6° left it 16.9 cm off, against 2.4 cm
+  for WPILib's; it is now 1.7 cm against 2.3. The simulator's gyro and cameras are simpler than
+  real ones, so this is the result to trust least.
+- With worse cameras than the simulator's (corners twice as noisy, tags seen to 5 m, each mount up
+  to 5 mm and 1° off), the default localizer is ahead in clean driving, 1.1 cm against 1.3, and its
+  heading's uncertainty stays honest. Before it learned the cameras' turns it was half a centimeter
+  behind there, and claimed about half the heading doubt a camera turned a degree costs.
 - WPILib's estimator, behind the kind of vision filter strong teams write for it, moves more
   smoothly. The default localizer corrects a wrong estimate in one step, which can be tens of
   centimeters after a shove.
