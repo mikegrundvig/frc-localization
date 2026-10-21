@@ -5,8 +5,8 @@ Java library on the [robot model](https://github.com/mikegrundvig/frc-robot-mode
 math, and nothing else of a robot program. It has no HAL, no NetworkTables and no clock, so a
 robot, a simulator and a replay of a log all get the same answers from it.
 
-It is unreleased. There are no versions yet, and anything may change. It has run in simulation
-only, never on a real robot.
+It is pre-release: versions are dated releases with no promise of compatibility from one to the
+next, and anything may change. It has run in simulation only, never on a real robot.
 
 ## What is in it
 
@@ -135,28 +135,29 @@ The runtime's `docs/localizers.md` says what the robot program does without each
 its pit page says so. Where this library's Javadoc points at `docs/`, it means the runtime's
 guides.
 
-A build includes this library as a git submodule, built as part of its own build (a Gradle
-composite build), so there is no version to bump:
-
-```
-git submodule add https://github.com/mikegrundvig/frc-localization.git localization
-```
+It is published to the FRC libraries' Maven repository,
+[mikegrundvig.github.io/frc-maven](https://mikegrundvig.github.io/frc-maven/), as
+`com.michaelgrundvig.frc:frc-localization`, with the conformance suite in its test fixtures. The
+runtime brings it, so a robot program built on the runtime has it already. Another build adds:
 
 ```groovy
-// settings.gradle
-includeBuild("localization")
-
 // build.gradle
+repositories {
+    exclusiveContent {
+        forRepository {
+            maven { url = "https://mikegrundvig.github.io/frc-maven/" }
+        }
+        filter { includeGroup "com.michaelgrundvig.frc" }
+    }
+}
 dependencies {
-    implementation "com.michaelgrundvig.frc:frc-localization"
-    testImplementation testFixtures("com.michaelgrundvig.frc:frc-localization")
+    implementation "com.michaelgrundvig.frc:frc-localization:2026.10.20"
+    testImplementation testFixtures("com.michaelgrundvig.frc:frc-localization:2026.10.20")
 }
 ```
 
-The build also includes the robot model, its own `includeBuild("model")`. This library includes
-its `model/` submodule only when it is the build that runs, because Gradle refuses two builds
-that provide one module. So a build that checks this library out does not need to initialize its
-submodule.
+It reads the robot model at the same version. WPILib's libraries are compiled against and never
+brought along: a robot program has them already, from GradleRIO, at its own version.
 
 ## Writing and testing your own
 
@@ -186,7 +187,7 @@ turned, not by what each reads.
 ## Building and testing it alone
 
 ```bash
-git clone --recurse-submodules https://github.com/mikegrundvig/frc-localization.git
+git clone https://github.com/mikegrundvig/frc-localization.git
 cd frc-localization
 ./gradlew test -Pquick     # the tests, fast
 ./gradlew ci               # everything CI runs: formatting, Error Prone and NullAway, tests, coverage, Javadoc
@@ -198,6 +199,23 @@ and they run in seconds.
 
 `./gradlew pitest -PpitClasses='com.michaelgrundvig.frc.localization.SlipCheck*'` runs mutation
 testing on some classes only.
+
+The robot model comes from the FRC libraries' repository, at the version the catalog's `frc-libs`
+names (`gradle/libs.versions.toml`). Two switches change where libraries come from, both off by
+default:
+
+- `-PlocalLibs=<folder>` builds the model from a clone of it in `<folder>/model`, from source, in
+  place of the published version, to try a change to the model here before it's published.
+- `-PfrcMaven=<url>` reads the published libraries from another copy of the repository, such as a
+  local clone holding a release not pushed yet: `-PfrcMaven=file:///home/you/src/frc-maven`.
+
+## Publishing it
+
+`./gradlew publishToFrcMaven` runs every check, then writes this release (the catalog's `frc-libs`)
+into `../frc-maven`, a clone of [frc-maven](https://github.com/mikegrundvig/frc-maven) beside this
+one (`-PfrcMavenDir=<folder>` names another). The model must be published at that version first;
+frc-maven's `release.sh` publishes every library in order and commits, and its README says how a
+release goes.
 
 ## What the comparison found
 

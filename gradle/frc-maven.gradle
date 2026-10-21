@@ -1,0 +1,20 @@
+// Where the FRC libraries this build reads come from: their Maven repository,
+// https://mikegrundvig.github.io/frc-maven/, which GitHub Pages serves from
+// github.com/mikegrundvig/frc-maven. Only it serves com.michaelgrundvig.frc, and it serves nothing
+// else, so no other repository can stand in for one of these libraries.
+//
+// -PfrcMaven=<url> reads them from somewhere else, such as a clone of that repository holding a
+// release that isn't pushed yet: -PfrcMaven=file:///home/you/src/frc-maven.
+repositories {
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "frcMaven"
+                url = providers.gradleProperty("frcMaven").orElse("https://mikegrundvig.github.io/frc-maven/").get()
+            }
+        }
+        filter {
+            includeGroup "com.michaelgrundvig.frc"
+        }
+    }
+}

@@ -1,7 +1,17 @@
-# Every version in one place: the build's and the tests' own. WPILib's libraries come with the robot
-# model, at the version the model is written in.
+# Every version in one place: the build's and the tests' own. WPILib's libraries are compiled
+# against through the robot model, and a robot program brings its own (build.gradle).
 
 [versions]
+# This release of the FRC libraries (the model, localization, Pitwall, the runtime): what this build
+# publishes as (gradle/publishing.gradle), and the robot model's version it reads. All of them share
+# it, so a release is one change, here.
+frc-libs = "2026.10.20"
+# WPILib's, for the tests alone: the model compiles against WPILib and a robot program brings its
+# own, so the tests take what a program would, at the model's versions.
+wpilib = "2027.0.0-alpha-7"
+avaje-jsonb = "3.14"
+ejml = "0.46.0"
+quickbuf = "1.4"
 spotless = "8.10.4"
 # The formatters Spotless runs (gradle/quality.gradle), pinned rather than left to Spotless's
 # defaults, so a newer Spotless can't reformat the code on its own: a formatter's new version is a
@@ -23,6 +33,15 @@ pitest-junit5 = "1.2.3"
 recordbuilder = "53"
 
 [libraries]
+frc-robot-model = { module = "com.michaelgrundvig.frc:frc-robot-model", version.ref = "frc-libs" }
+frc-docs-processor = { module = "com.michaelgrundvig.frc:frc-docs-processor", version.ref = "frc-libs" }
+wpilib-math = { module = "org.wpilib.wpimath:wpimath-java", version.ref = "wpilib" }
+wpilib-units = { module = "org.wpilib.wpiunits:wpiunits-java", version.ref = "wpilib" }
+wpilib-util = { module = "org.wpilib.wpiutil:wpiutil-java", version.ref = "wpilib" }
+wpilib-fields = { module = "org.wpilib.fields:fields-java", version.ref = "wpilib" }
+avaje-jsonb = { module = "io.avaje:avaje-jsonb", version.ref = "avaje-jsonb" }
+ejml-simple = { module = "org.ejml:ejml-simple", version.ref = "ejml" }
+quickbuf-runtime = { module = "us.hebi.quickbuf:quickbuf-runtime", version.ref = "quickbuf" }
 recordbuilder-core = { module = "io.soabase.record-builder:record-builder-core", version.ref = "recordbuilder" }
 recordbuilder-processor = { module = "io.soabase.record-builder:record-builder-processor", version.ref = "recordbuilder" }
 errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone" }

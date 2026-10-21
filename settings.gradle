@@ -15,15 +15,25 @@ plugins {
 
 rootProject.name = "frc-localization"
 
-// What this build is made of: the robot model (model/), a repository of its own and a git submodule
-// here. Whatever asks for com.michaelgrundvig.frc:frc-robot-model gets what the folder holds.
-//
-// It is included only when this is the build that runs. A build that includes this one (the
-// runtime's, or a robot program's) has its own model/, and Gradle refuses two builds that provide
-// the same module, so it provides the model and this build asks for what it finds.
-if (gradle.parent == null) {
-    if (!file("model/settings.gradle").exists()) {
-        throw new GradleException("The robot model isn't checked out (model/ is empty). Run: git submodule update --init")
+// Developing the libraries together: -PlocalLibs=<folder> builds the robot model from the clone in
+// that folder's model/, from its source, in place of the published version this build otherwise
+// reads (build.gradle), so a change to the model is seen here before it's published. Off unless
+// asked for. Only the build that runs reads it: a build that includes this one decides for both.
+def localLibs = providers.gradleProperty("localLibs").orNull
+if (localLibs != null && gradle.parent == null) {
+    def folder = new File(localLibs.startsWith("~") ? System.getProperty("user.home") + localLibs.substring(1) : localLibs)
+    folder = folder.absolute ? folder : new File(settingsDir, localLibs)
+    if (!folder.directory) {
+        throw new GradleException("-PlocalLibs=${localLibs} isn't a folder: name the one holding model/")
     }
-    includeBuild("model")
+    def model = new File(folder, "model")
+    if (new File(model, "settings.gradle").exists()) {
+        logger.lifecycle("Building the robot model from ${model} (-PlocalLibs)")
+        includeBuild(model) {
+            // Its processor's project is docs-processor; it's published as frc-docs-processor.
+            dependencySubstitution {
+                substitute module("com.michaelgrundvig.frc:frc-docs-processor") using project(":docs-processor")
+            }
+        }
+    }
 }

@@ -307,11 +307,6 @@ tasks.register("ci") {
     dependsOn "spotlessCheck", "build", "javadoc"
     // From the top of the build, every project's checks.
     dependsOn project.subprojects.collect { it.path + ":ci" }
-    // And, when this is the build that runs (settings.gradle), the robot model's own; a build that
-    // includes this one runs it itself.
-    if (project == rootProject && gradle.parent == null) {
-        dependsOn gradle.includedBuild("model").task(":ci")
-    }
 }
 
 /** Counts the test JVMs running at once, for Gradle to keep to its limit; it holds nothing. */

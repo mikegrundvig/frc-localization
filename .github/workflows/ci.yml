@@ -26,8 +26,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The robot model (model/) is a submodule: the build stops without it.
-          submodules: true
       # Caches Gradle, dependencies, and the JDK 25 toolchain Gradle downloads on first use.
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:

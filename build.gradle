@@ -12,8 +12,7 @@ plugins {
     alias(libs.plugins.pitest)
 }
 
-// What a build that includes this one asks for (settings.gradle, includeBuild): the library is
-// com.michaelgrundvig.frc:frc-localization.
+// Published as com.michaelgrundvig.frc:frc-localization (gradle/publishing.gradle, at the end).
 group = "com.michaelgrundvig.frc"
 
 java {
@@ -33,11 +32,21 @@ repositories {
     }
     mavenCentral()
 }
+// And the FRC libraries' own repository, for the robot model.
+apply from: file("gradle/frc-maven.gradle")
 
 dependencies {
     // The field and the robot's definition appear in its signatures, and with them WPILib's math,
-    // at the version the model is written in.
-    api "com.michaelgrundvig.frc:frc-robot-model"
+    // which the model compiles against and a robot program brings itself (the model's build.gradle
+    // says why). The tests have WPILib's libraries as any program does.
+    api libs.frc.robot.model
+    testImplementation libs.wpilib.math
+    testImplementation libs.wpilib.units
+    testImplementation libs.wpilib.util
+    testImplementation libs.wpilib.fields
+    testImplementation libs.ejml.simple
+    testImplementation libs.quickbuf.runtime
+    testImplementation libs.avaje.jsonb
 
     // Configuration records are built by name, through builders generated as they compile.
     compileOnly libs.recordbuilder.core
@@ -46,7 +55,7 @@ dependencies {
     annotationProcessor libs.recordbuilder.processor
     // Writes the configuration records' Javadoc into the jar, so Pitwall's page can say what each
     // value means. It runs in the compiler only: localization never sees Pitwall.
-    annotationProcessor "com.michaelgrundvig.frc:docs-processor"
+    annotationProcessor libs.frc.docs.processor
 
     errorprone libs.errorprone.core
     errorprone libs.nullaway
@@ -76,6 +85,15 @@ tasks.named("test") {
 }
 
 apply from: file("gradle/quality.gradle")
+
+ext.published = [
+    artifactId: "frc-localization",
+    name: "FRC localization",
+    description: "Where an FRC robot is on the field, from its wheels, its IMUs and its cameras: the localizer contract, two localizers that keep it, the solving of camera images into measurements, and the calibration math.",
+    repository: "frc-localization",
+    license: "BSD 3-Clause License",
+]
+apply from: file("gradle/publishing.gradle")
 
 // Mutation testing: PIT changes localization's compiled code a little at a time (a comparison
 // turned round, a returned value emptied, a call removed) and runs the tests that cover each
