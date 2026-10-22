@@ -33,6 +33,8 @@ if (localLibs != null && gradle.parent == null) {
             // Its processor's project is docs-processor; it's published as frc-docs-processor.
             dependencySubstitution {
                 substitute module("com.michaelgrundvig.frc:frc-docs-processor") using project(":docs-processor")
+                // Naming one substitution turns off Gradle's automatic ones, so the model is named too.
+                substitute module("com.michaelgrundvig.frc:frc-robot-model") using project(":")
             }
         }
     }
