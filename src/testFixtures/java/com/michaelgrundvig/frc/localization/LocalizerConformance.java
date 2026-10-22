@@ -91,12 +91,12 @@ public abstract class LocalizerConformance {
       Body.builder()
           .frameLength(Inches.of(28))
           .frameWidth(Inches.of(24))
-          .height(Inches.of(30))
+          .overallHeight(Inches.of(30))
           .bumperEnds(Inches.of(3.5))
           .bumperSides(Inches.of(3.5))
           .bumperBottom(Inches.of(2.5))
           .bumperTop(Inches.of(5.75))
-          .weight(Body.Weight.weighed(Kilograms.of(60)))
+          .weight(Kilograms.of(60))
           .inertia(
               Body.Turning.tensor(
                   Inertia.builder().ixx(6).iyy(6).izz(6).ixy(0).ixz(0).iyz(0).build()))
