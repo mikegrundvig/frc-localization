@@ -5,7 +5,7 @@
 # This release of the FRC libraries (the model, localization, Pitwall, the runtime): what this build
 # publishes as (gradle/publishing.gradle), and the robot model's version it reads. All of them share
 # it, so a release is one change, here.
-frc-libs = "2026.10.22"
+frc-libs = "2026.10.23"
 # WPILib's, for the tests alone: the model compiles against WPILib and a robot program brings its
 # own, so the tests take what a program would, at the model's versions.
 wpilib = "2027.0.0-alpha-7"
