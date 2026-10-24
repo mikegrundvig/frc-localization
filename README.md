@@ -151,8 +151,8 @@ repositories {
     }
 }
 dependencies {
-    implementation "com.michaelgrundvig.frc:frc-localization:2026.10.23"
-    testImplementation testFixtures("com.michaelgrundvig.frc:frc-localization:2026.10.23")
+    implementation "com.michaelgrundvig.frc:frc-localization:2026.10.24"
+    testImplementation testFixtures("com.michaelgrundvig.frc:frc-localization:2026.10.24")
 }
 ```
 
