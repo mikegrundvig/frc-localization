@@ -8,6 +8,10 @@ updates:
       interval: weekly
     ignore:
       - dependency-name: "gradle-wrapper"
+      - dependency-name: "org.wpilib*"
+      - dependency-name: "org.ejml*"
+      - dependency-name: "io.avaje:avaje-jsonb"
+      - dependency-name: "us.hebi.quickbuf:quickbuf-runtime"
   - package-ecosystem: github-actions
     directory: /
     schedule:
