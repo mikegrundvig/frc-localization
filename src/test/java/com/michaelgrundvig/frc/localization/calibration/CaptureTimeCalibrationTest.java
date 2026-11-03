@@ -107,6 +107,74 @@ class CaptureTimeCalibrationTest {
     }
   }
 
+  /**
+   * Images 2.9° apart (30 a second at 1.5 rad/s), the right spin's falling half a frame from the
+   * left's, against a solve error that changes steeply with where the robot points: each direction
+   * then meets the error at its own headings, and a fit that took the error as flat within a group
+   * would read the difference as time.
+   */
+  @Test
+  void aSteepBiasMetAtOtherHeadingsEachWayDropsOut() {
+    for (double late : new double[] {0, 0.02}) {
+      CaptureTimeCalibration calibration = new CaptureTimeCalibration();
+      double rate = 1.5;
+      double step = rate / 30;
+      double reach = Math.toRadians(50);
+      for (double way : new double[] {1, -1}) {
+        double phase = way > 0 ? 0 : step / 2;
+        for (double taken = -reach + phase; taken < reach; taken += step) {
+          Rotation2d atStamp = new Rotation2d(taken + way * rate * late);
+          Pose3d robot = new Pose3d(0, 0, 0, new Rotation3d(0, 0, taken));
+          Transform3d view = new Transform3d(robot.transformBy(MOUNT), TAG);
+          // 1.5° of error swinging over a 30° stretch of heading: steep within any one group.
+          double error = Math.toRadians(1.5) * Math.sin(12 * taken);
+          calibration.add(
+              TAG,
+              MOUNT,
+              turned(view, error),
+              turned(view, Math.toRadians(70)),
+              atStamp,
+              way * rate);
+        }
+      }
+      CaptureTimeCalibration.Result result = calibration.solve().orElseThrow();
+      assertThat(result.lateSeconds())
+          .as("%.0f ms late", late * 1000)
+          .isCloseTo(late, within(0.0005));
+    }
+  }
+
+  /**
+   * A real spin's rate isn't even: it wobbles with where the robot points (a swerve's modules, a
+   * carpet's nap). With a solve error that also changes with heading, a fit that took each image's
+   * own rate would read the two lining up as time: only the difference between the directions says
+   * time.
+   */
+  @Test
+  void aRateThatWobblesWithHeadingIsNotTakenForTime() {
+    for (double late : new double[] {0, 0.02}) {
+      CaptureTimeCalibration calibration = new CaptureTimeCalibration();
+      double reach = Math.toRadians(50);
+      for (double way : new double[] {1, -1}) {
+        for (int i = 0; i < 2000; i++) {
+          double taken = -reach + 2 * reach * i / 2000.0;
+          // 1.5 rad/s, 20% faster and slower as the heading goes round, the error rising with it.
+          double rate = way * 1.5 * (1 + 0.2 * Math.sin(12 * taken));
+          Rotation2d atStamp = new Rotation2d(taken + rate * late);
+          Pose3d robot = new Pose3d(0, 0, 0, new Rotation3d(0, 0, taken));
+          Transform3d view = new Transform3d(robot.transformBy(MOUNT), TAG);
+          double error = Math.toRadians(1.5) * Math.sin(12 * taken);
+          calibration.add(
+              TAG, MOUNT, turned(view, error), turned(view, Math.toRadians(70)), atStamp, rate);
+        }
+      }
+      CaptureTimeCalibration.Result result = calibration.solve().orElseThrow();
+      assertThat(result.lateSeconds())
+          .as("%.0f ms late", late * 1000)
+          .isCloseTo(late, within(0.0005));
+    }
+  }
+
   @Test
   void aBiasThatDependsOnWhereTheRobotPointsDropsOut() {
     // Without the grouping by heading, the bias's sine, met at different times each way, would
