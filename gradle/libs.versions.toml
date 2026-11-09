@@ -12,7 +12,7 @@ wpilib = "2027.0.0-alpha-7"
 avaje-jsonb = "3.14"
 ejml = "0.46.0"
 quickbuf = "1.4"
-spotless = "8.10.4"
+spotless = "8.11.0"
 # The formatters Spotless runs (gradle/quality.gradle), pinned rather than left to Spotless's
 # defaults, so a newer Spotless can't reformat the code on its own: a formatter's new version is a
 # change of its own, with the reformatting it brings. Dependabot doesn't see them: bump them by hand.
