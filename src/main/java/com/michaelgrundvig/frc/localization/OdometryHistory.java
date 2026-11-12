@@ -1,5 +1,6 @@
 package com.michaelgrundvig.frc.localization;
 
+import java.util.Arrays;
 import org.wpilib.math.geometry.Pose2d;
 import org.wpilib.math.geometry.Rotation2d;
 import org.wpilib.math.geometry.Translation2d;
@@ -227,7 +228,7 @@ final class OdometryHistory {
     carriedXAfter[oldestSlot] = 0;
     carriedYAfter[oldestSlot] = 0;
     carriedVarianceAfter[oldestSlot] = 0;
-    java.util.Arrays.fill(
+    Arrays.fill(
         turnReopenedBy,
         oldestSlot * ConsideredErrors.MAX_CAMERAS,
         (oldestSlot + 1) * ConsideredErrors.MAX_CAMERAS,
@@ -279,7 +280,7 @@ final class OdometryHistory {
     gyroTurnAfterRadians[slot] = gyroTurnAfterRadians[previous] + gyroTurn;
     gyroSecondsAfter[slot] = gyroSecondsAfter[previous] + gyroSeconds;
     driftSeenAtRest[slot] = Double.NaN;
-    java.util.Arrays.fill(
+    Arrays.fill(
         turnReopenedBy,
         slot * ConsideredErrors.MAX_CAMERAS,
         (slot + 1) * ConsideredErrors.MAX_CAMERAS,

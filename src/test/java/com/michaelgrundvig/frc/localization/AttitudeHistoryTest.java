@@ -51,6 +51,6 @@ class AttitudeHistoryTest {
 
   @Test
   void itKeepsAtLeastTwoReadings() {
-    assertThatThrownBy(() -> new AttitudeHistory(1)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new AttitudeHistory(1)).hasMessage("keep at least two readings: 1");
   }
 }

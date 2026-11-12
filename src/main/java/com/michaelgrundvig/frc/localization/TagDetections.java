@@ -14,9 +14,16 @@ import org.wpilib.math.geometry.Translation2d;
  * @param camera the camera's name, as in the robot's configuration
  * @param tags each tag seen
  * @param multiTag the vision software's solution from all the tags at once, if it made one
+ * @param unsolvedTags the numbers of the tags the vision software found and couldn't solve a pose
+ *     for: Visor sends a tag's corners alone without a lens calibration, or for a tag seen too
+ *     edge-on. None from PhotonVision, which sends only the tags it solved
  */
 public record TagDetections(
-    long timestampNanos, String camera, List<Tag> tags, @Nullable MultiTag multiTag) {
+    long timestampNanos,
+    String camera,
+    List<Sighting> tags,
+    @Nullable MultiTag multiTag,
+    List<Integer> unsolvedTags) {
   public TagDetections {
     if (timestampNanos < 0) {
       throw new IllegalArgumentException("a time on the robot's clock: " + timestampNanos);
@@ -25,10 +32,17 @@ public record TagDetections(
       throw new IllegalArgumentException("detections need their camera's name");
     }
     tags = List.copyOf(tags);
+    unsolvedTags = List.copyOf(unsolvedTags);
+  }
+
+  /** An image whose every tag was solved. */
+  public TagDetections(
+      long timestampNanos, String camera, List<Sighting> tags, @Nullable MultiTag multiTag) {
+    this(timestampNanos, camera, tags, multiTag, List.of());
   }
 
   /**
-   * One tag in the image.
+   * One tag as the camera saw it in the image.
    *
    * @param id the tag's number
    * @param corners the four corners in the image, in pixels
@@ -37,13 +51,13 @@ public record TagDetections(
    * @param altCameraToTag the other of the two
    * @param ambiguity how close the two are to equally likely: 0 is certain, 1 a coin toss
    */
-  public record Tag(
+  public record Sighting(
       int id,
       List<Translation2d> corners,
       Transform3d bestCameraToTag,
       Transform3d altCameraToTag,
       double ambiguity) {
-    public Tag {
+    public Sighting {
       if (corners.size() != 4) {
         throw new IllegalArgumentException("tag " + id + " needs its 4 corners: " + corners.size());
       }

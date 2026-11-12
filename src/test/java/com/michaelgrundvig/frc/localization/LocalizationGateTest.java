@@ -28,18 +28,19 @@ class LocalizationGateTest {
         Translation2d.ZERO,
         0,
         mode,
-        new Health(
-            visionAgeSeconds,
-            100,
-            2,
-            0.03,
-            disagreementMeters,
-            0.001,
-            0.01,
-            Math.toRadians(tiltDegrees),
-            collision,
-            0,
-            true));
+        Health.builder()
+            .visionAgeSeconds(visionAgeSeconds)
+            .accepted(100)
+            .rejected(2)
+            .lastInnovationMeters(0.03)
+            .recentDisagreementMeters(disagreementMeters)
+            .residualMeters(0.001)
+            .suspectTravelMeters(0.01)
+            .tiltRadians(Math.toRadians(tiltDegrees))
+            .collisionActive(collision)
+            .recoveries(0)
+            .gyroConnected(true)
+            .build());
   }
 
   private static LocalizationEstimate good() {
@@ -85,12 +86,12 @@ class LocalizationGateTest {
   @Test
   void limitsMustBePositive() {
     assertThatThrownBy(() -> LocalizationGateBuilder.builder(GATE).maxDisagreementMeters(0).build())
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("LocalizationGate.maxDisagreementMeters: 0 must be positive");
     assertThatThrownBy(
             () ->
                 LocalizationGateBuilder.builder(GATE)
                     .maxVisionAgeSeconds(Double.POSITIVE_INFINITY)
                     .build())
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("LocalizationGate.maxVisionAgeSeconds: Infinity must be a finite number");
   }
 }

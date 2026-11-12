@@ -53,7 +53,9 @@ class YawTrackTest {
     track.clear();
 
     assertThat(track.hasReadings()).isFalse();
-    assertThatThrownBy(() -> track.at(20 * MS)).isInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(() -> track.at(20 * MS))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("no readings this loop");
     track.update(new long[] {40 * MS}, new double[] {2.0});
     assertThat(track.at(30 * MS)).as("nothing before the reset to interpolate from").isEqualTo(2.0);
   }
@@ -61,6 +63,6 @@ class YawTrackTest {
   @Test
   void eachYawHasItsTime() {
     assertThatThrownBy(() -> new YawTrack().update(new long[] {1, 2}, new double[] {0}))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("one time for each yaw");
   }
 }

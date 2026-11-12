@@ -57,6 +57,20 @@ final class ErrorPlaces {
   }
 
   /**
+   * A camera's place, if it has one, without giving it one: for what is said about a camera, which
+   * must not change which cameras have places.
+   *
+   * @return its place, or {@link ConsideredErrors#NO_PLACE} if it has none
+   */
+  int placeIfAny(String camera) {
+    Integer place = cameraPlaces.get(camera);
+    if (place == null) {
+      return ConsideredErrors.NO_PLACE;
+    }
+    return place;
+  }
+
+  /**
    * A camera's place, giving it the next free one if this is the first time it is asked about.
    *
    * @return its place, or {@link ConsideredErrors#NO_PLACE} if every place was taken before it came

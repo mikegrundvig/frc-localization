@@ -62,7 +62,7 @@ The contract says what a localizer must do to be driven by. It says nothing abou
 ### The options
 
 A localizer may also report more. Each option is one method that returns an `Optional`, and
-returns empty unless you override it: `covariance()`, `mode()`, `health()`, `decisions()`,
+returns empty unless you override it: `covariance()`, `mode()`, `health()`, `verdicts()`,
 `fieldVelocities()`, `wheels()`, `trust()` and `yawSource()`.
 
 Report an option only where your localizer really knows the answer. Whoever reads an empty one
@@ -91,8 +91,8 @@ the others for one knocked on its mount or stamped late. It reports every option
 **Cameras' turns on their mounts.** A camera turned a degree from where the robot's description
 says puts every tag, and so the robot, a degree round: 5 cm at 3 m, the same way in every image,
 and every heading it gives a degree off. The estimator keeps each camera's turn in its state,
-starting as unsure as the camera's `mountTolerance` (5 mm and 1° unless the robot says otherwise),
-and learns it from the camera's images:
+starting as unsure as the camera's `mountTolerance` (25 mm and 3° for a mount nobody has checked,
+5 mm and 1° once the mount procedure has), and learns it from the camera's images:
 
 - No single image tells a camera's turn from a heading error: the image sees both alike. The gyro
   carries the heading from one camera's images to the next's, so how each camera's turn differs
@@ -114,7 +114,8 @@ before, as an error it repeats in every image.
 wheel reading, and the pipeline's measurements with their standard deviations. It keeps the
 required contract and reports none of the options, because WPILib's estimator keeps no
 uncertainty, no mode and no record of what it did with a measurement. Since it reports no
-covariance, its images are solved from their tags alone, never with the gyro's heading.
+covariance, its images are solved from their tags alone, never with the gyro's heading, and a
+single tag's heading reaches it as the pipeline solved it.
 
 WPILib's estimator leaves some things to the code that calls it. `WpilibLocalizer` does them, and
 its Javadoc says how: which sensor turns it when the gyro is lost, what happens to a placement's
@@ -128,7 +129,7 @@ The [robot runtime](https://github.com/mikegrundvig/frc-robot-runtime) runs a
 that names none gets the default localizer. One line in a robot's block chooses another:
 
 ```java
-.localizer(WpilibLocalizer::new)
+.withLocalizer(WpilibLocalizer::new)
 ```
 
 The runtime's `docs/localizers.md` says what the robot program does without each option, and how
@@ -151,8 +152,8 @@ repositories {
     }
 }
 dependencies {
-    implementation "com.michaelgrundvig.frc:frc-localization:2026.11.11"
-    testImplementation testFixtures("com.michaelgrundvig.frc:frc-localization:2026.11.11")
+    implementation "com.michaelgrundvig.frc:frc-localization:2026.11.13"
+    testImplementation testFixtures("com.michaelgrundvig.frc:frc-localization:2026.11.13")
 }
 ```
 
@@ -177,7 +178,7 @@ class WpilibLocalizerConformanceTest extends LocalizerConformance {
 Name the options your localizer reports after the maker, such as `Option.COVARIANCE`. The suite
 runs the clauses for those, and checks that the rest really are empty.
 
-Both localizers here pass it. The default one passes all 21 scenarios. WPILib's passes the 16
+Both localizers here pass it. The default one passes all 27 scenarios. WPILib's passes the 22
 that every localizer must, and the 5 for options it does not report are skipped.
 
 Your localizer picks its own gyro. `DrivetrainReadings` has the gyro and the backup IMU, and
@@ -242,8 +243,17 @@ What it found, in simulation only:
   centimeters after a shove.
 - Most of each difference comes from how images are solved and filtered, not from the estimator.
   Fed the very same measurements, the two estimators are close in most scenarios.
-- The study did not measure a robot that chose `WpilibLocalizer`. Such a robot's images are solved
-  without the gyro's heading, which none of the study's contenders did with this pipeline.
+- A robot that chose `WpilibLocalizer` was measured too, on PhotonVision's cameras and on Visor's,
+  which send no multi-tag solution. Its images are solved from their tags alone: 0.9 cm in clean
+  driving on PhotonVision, 1.5 cm on Visor, against the default localizer's 0.7 cm. It keeps a
+  single tag's heading, at the pipeline's standard deviation, since on Visor nothing else corrects
+  a wrong one: behind the strong teams' filter, which ignores one tag's heading, WPILib's estimator
+  set down 30° off stays 30° off.
+- A placement's heading is a person's word, as a driver's heading reset is: the default localizer
+  solves no image with it until a camera's own heading agrees, and counts a camera's that
+  disagrees against it. Set down 30° off its start's heading, or backwards, it finds its heading
+  in 0.1 s on PhotonVision and 0.2 s on Visor; before, it took 20 s or never did on Visor, and
+  21 s backwards on PhotonVision.
 
 No real robot was involved. Do not quote a number from it as a fact about your robot.
 

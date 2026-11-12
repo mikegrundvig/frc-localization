@@ -54,8 +54,8 @@ class PoseFilterMonteCarloTest {
   private static final double CENTER_X = 3;
   private static final double CENTER_Y = 4;
 
-  private static final PoseFilter.Considered CONSIDERED =
-      new PoseFilter.Considered(
+  private static final ConsideredSizes CONSIDERED =
+      new ConsideredSizes(
           SCALE, 2 * SCALE, TURN, SHIFT, HEADING_SHIFT, TAG, SHIFT_METERS, SHIFT_RADIANS);
 
   /** One world: the truth, what it drew, and the filter following it. */
@@ -233,7 +233,8 @@ class PoseFilterMonteCarloTest {
   @Test
   void standingDrivingAndTurningItsNeesAveragesItsDimensions() {
     // Each world's draws last all its loops, so the worlds are the sample: a thousand put the mean
-    // NEES within about 0.06 of 2, and 0.05 of 1.
+    // NEES within about 0.06 of 2, and 0.05 of 1, for one standard deviation. The bands are about
+    // three of them. Recorded 2026-11-09: position 1.97 to 2.00, heading 0.99 to 1.05.
     int worlds = 1000;
     int[] phases = {150, 75, 75, 100, 300, 150};
     double[] speeds = {0, 1, -1, 0, 0, 0};
@@ -255,8 +256,8 @@ class PoseFilterMonteCarloTest {
     for (int phase = 0; phase < phases.length; phase++) {
       double p = position[phase][0] / position[phase][1];
       double h = heading[phase][0] / heading[phase][1];
-      assertThat(p).as("position NEES, phase %d", phase).isBetween(1.7, 2.3);
-      assertThat(h).as("heading NEES, phase %d", phase).isBetween(0.8, 1.2);
+      assertThat(p).as("position NEES, phase %d", phase).isBetween(1.82, 2.18);
+      assertThat(h).as("heading NEES, phase %d", phase).isBetween(0.85, 1.15);
     }
   }
 }

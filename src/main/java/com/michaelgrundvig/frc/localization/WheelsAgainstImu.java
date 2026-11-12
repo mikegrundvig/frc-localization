@@ -1,8 +1,9 @@
 package com.michaelgrundvig.frc.localization;
 
 import com.michaelgrundvig.frc.world.robot.ImuMount;
-import com.michaelgrundvig.frc.world.robot.Imus;
+import com.michaelgrundvig.frc.world.robot.RobotMath;
 import java.util.List;
+import java.util.Optional;
 import org.jspecify.annotations.Nullable;
 import org.wpilib.math.kinematics.ChassisVelocities;
 import org.wpilib.math.util.MathUtil;
@@ -18,8 +19,11 @@ import org.wpilib.math.util.MathUtil;
 final class WheelsAgainstImu {
   private final SlipCheck slipCheck;
 
-  /** Where each IMU is mounted, and whether its accelerometer reads along the robot's axes. */
-  private final Imus imus;
+  /** Where the gyro is mounted, and whether its accelerometer reads along the robot's axes. */
+  private final ImuMount gyro;
+
+  /** The same of the backup IMU, if the robot has one. */
+  private final Optional<ImuMount> backup;
 
   // The last wheel reading of the last loop that had any: when it was read, which IMU read its
   // yaw, and what that yaw was. The next loop's turn and time are measured from them.
@@ -27,9 +31,14 @@ final class WheelsAgainstImu {
   private YawSource lastStepYawFrom = YawSource.WHEELS;
   private double lastStepYaw = Double.NaN;
 
-  WheelsAgainstImu(SlipCheck slipCheck, Imus imus) {
+  /**
+   * @param gyro where the gyro is mounted: the drivetrain's ({@code RobotDefinition.gyroMount})
+   * @param backup where the backup IMU is, if the robot has one
+   */
+  WheelsAgainstImu(SlipCheck slipCheck, ImuMount gyro, Optional<ImuMount> backup) {
     this.slipCheck = slipCheck;
-    this.imus = imus;
+    this.gyro = gyro;
+    this.backup = backup;
   }
 
   /** What the comparison found. */
@@ -97,9 +106,9 @@ final class WheelsAgainstImu {
    */
   private ImuMount mountOf(YawSource imu) {
     if (imu == YawSource.GYRO) {
-      return imus.gyro();
+      return gyro;
     }
-    return imus.backup().orElse(ImuMount.UNCHECKED);
+    return backup.orElse(ImuMount.UNCHECKED);
   }
 
   /**
@@ -117,11 +126,11 @@ final class WheelsAgainstImu {
 
   private static double forwardAccelerationWithoutGravity(ImuReadings imu) {
     return imu.forwardAccelerationMetersPerSecSq()
-        + ImuReadings.STANDARD_GRAVITY * Math.sin(imu.pitchRadians());
+        + RobotMath.GRAVITY * Math.sin(imu.pitchRadians());
   }
 
   private static double leftAccelerationWithoutGravity(ImuReadings imu) {
     return imu.leftAccelerationMetersPerSecSq()
-        - ImuReadings.STANDARD_GRAVITY * Math.sin(imu.rollRadians()) * Math.cos(imu.pitchRadians());
+        - RobotMath.GRAVITY * Math.sin(imu.rollRadians()) * Math.cos(imu.pitchRadians());
   }
 }

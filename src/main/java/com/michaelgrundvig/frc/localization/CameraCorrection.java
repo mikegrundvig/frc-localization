@@ -19,6 +19,7 @@ import static com.michaelgrundvig.frc.localization.StateLayout.cell;
 import static com.michaelgrundvig.frc.localization.StateLayout.isACameraTurn;
 import static com.michaelgrundvig.frc.localization.StateLayout.turnOf;
 
+import java.util.Arrays;
 import java.util.List;
 import org.jspecify.annotations.Nullable;
 import org.wpilib.math.util.MathUtil;
@@ -42,10 +43,11 @@ final class CameraCorrection {
   /** How many tags' placements have columns of their own. */
   private final int tagCount;
 
-  private final boolean positionFixesCorrectHeading;
+  /** What corrects the heading: every fix, or only measurements with a heading of their own. */
+  private final HeadingCorrection heading;
 
   /** Whether a measurement that corrects the heading corrects the gyro's errors with it. */
-  private final boolean estimatesGyroErrors;
+  private final EstimatorConfig.GyroErrors gyroErrors;
 
   /** What a camera's turn and shift on its mount are taken to be for a camera without a place. */
   private final double usualCameraTurnVariance;
@@ -150,9 +152,10 @@ final class CameraCorrection {
   /**
    * @param sizes how unsure the filter is of the errors it considers
    * @param tags how many tags' placements have columns of their own
-   * @param positionFixesCorrectHeading whether a position fix also corrects the heading
-   * @param estimatesGyroErrors whether a measurement that corrects the heading corrects the gyro's
-   *     scale and drift too
+   * @param heading what corrects the heading: every fix, or only measurements with a heading of
+   *     their own
+   * @param gyroErrors whether a measurement that corrects the heading corrects the gyro's scale and
+   *     drift too
    * @param covariance the filter's P, which this corrects in place
    * @param crossCovariance the filter's C, which this corrects in place
    * @param cameraShiftVariance the filter's variance of each camera's shift, which this only reads
@@ -160,18 +163,18 @@ final class CameraCorrection {
    *     reads
    */
   CameraCorrection(
-      PoseFilter.Considered sizes,
+      ConsideredSizes sizes,
       int tags,
-      boolean positionFixesCorrectHeading,
-      boolean estimatesGyroErrors,
+      HeadingCorrection heading,
+      EstimatorConfig.GyroErrors gyroErrors,
       double[] covariance,
       double[] crossCovariance,
       double[] cameraShiftVariance,
       double[] turnPriorVariance) {
     tagCount = tags;
     consideredCount = ConsideredErrors.count(tags);
-    this.positionFixesCorrectHeading = positionFixesCorrectHeading;
-    this.estimatesGyroErrors = estimatesGyroErrors;
+    this.heading = heading;
+    this.gyroErrors = gyroErrors;
     usualCameraTurnVariance = square(sizes.cameraTurnStdDevRadians());
     usualCameraShiftVariance = square(sizes.cameraShiftStdDevMeters());
     headingsShiftVariance = square(sizes.cameraShiftStdDevRadians());
@@ -205,7 +208,7 @@ final class CameraCorrection {
    * @return the innovation, or null when the measurement cannot be compared with the estimate at
    *     all: its uncertainty and the estimate's together leave no spread to measure a distance in
    */
-  PoseFilter.@Nullable Innovation compare(
+  @Nullable Innovation compare(
       VisionMeasurement measurement,
       double x,
       double y,
@@ -247,7 +250,7 @@ final class CameraCorrection {
       }
     }
     workOutGain();
-    return new PoseFilter.Innovation(
+    return new Innovation(
         innovation[X],
         innovation[Y],
         rowCount == POSE_ROWS,
@@ -268,9 +271,7 @@ final class CameraCorrection {
     double sxy = innovationCovariance[X_WITH_Y];
     double syy = innovationCovariance[Y_WITH_Y];
     double determinant = sxx * syy - sxy * sxy;
-    // Written so a determinant that is not a number counts as degenerate too.
-    boolean positionHasSpread = determinant > 0;
-    if (!positionHasSpread) {
+    if (!Matrices.invertible2(sxx, sxy, syy)) {
       return Double.NaN;
     }
     return (syy * innovation[X] * innovation[X]
@@ -293,9 +294,7 @@ final class CameraCorrection {
     double sxy = innovationCovariance[X_WITH_Y];
     double syy = innovationCovariance[Y_WITH_Y];
     double determinant = sxx * syy - sxy * sxy;
-    // Written so a determinant that is not a number counts as no inverse too.
-    boolean invertible = determinant > 0;
-    if (!invertible) {
+    if (!Matrices.invertible2(sxx, sxy, syy)) {
       return false;
     }
     innovationCovarianceInverse[X_WITH_X] = syy / determinant;
@@ -364,7 +363,7 @@ final class CameraCorrection {
    */
   private void describeWhatItSees(
       VisionMeasurement measurement, double headingThen, int camera, int[] tagPlaces) {
-    java.util.Arrays.fill(stateSeenBy, 0);
+    Arrays.fill(stateSeenBy, 0);
     seenStates[0] = X;
     seenStates[1] = Y;
     seenStates[2] = HEADING;
@@ -407,13 +406,16 @@ final class CameraCorrection {
     shared.add(shiftLeftColumn, shiftVariance, -sin, cos, 0);
     // Its headings' shift moves only its heading.
     shared.add(headingsShiftColumn, headingsShiftVariance, 0, 0, 1);
-    // A tag that is off the layout moves the position the other way, by the tag's share of it.
+    // A tag that is off the layout moves the position the other way, by the tag's share of it. The
+    // places fill the measurement's own count of tags, which is also its count of shares; past it,
+    // the array holds an earlier measurement's.
     List<Double> shares = measurement.tagShares();
-    for (int index = 0; index < shares.size(); index++) {
+    int tags = measurement.tagIds().size();
+    for (int index = 0; index < tags; index++) {
       double share = shares.get(index);
       int alongXColumn = ConsideredErrors.NO_COLUMN;
       int alongYColumn = ConsideredErrors.NO_COLUMN;
-      if (index < tagPlaces.length && isOneOfTheFilterTags(tagPlaces[index])) {
+      if (isOneOfTheFilterTags(tagPlaces[index])) {
         alongXColumn = ConsideredErrors.tagAlongX(tagPlaces[index]);
         alongYColumn = ConsideredErrors.tagAlongY(tagPlaces[index]);
       }
@@ -544,8 +546,10 @@ final class CameraCorrection {
    * #correctUncertainty} updates the covariance in the form that is right for any gain.
    */
   private void workOutGain() {
+    boolean positionFixesCorrectHeading = heading == HeadingCorrection.EVERY_FIX;
     boolean leavesHeadingAlone = rowCount == POSITION_ROWS && !positionFixesCorrectHeading;
-    boolean leavesGyroErrorsAlone = leavesHeadingAlone || !estimatesGyroErrors;
+    boolean gyroErrorsEstimated = gyroErrors == EstimatorConfig.GyroErrors.ESTIMATED;
+    boolean leavesGyroErrorsAlone = leavesHeadingAlone || !gyroErrorsEstimated;
     boolean leavesTurnsAlone = leavesHeadingAlone;
     for (int state = 0; state < activeStates; state++) {
       boolean isAGyroError = state == GYRO_SCALE || state == GYRO_DRIFT;
@@ -616,7 +620,7 @@ final class CameraCorrection {
   }
 
   /** Refuses an innovation that is not the one whose working is still held here. */
-  void requireLatest(PoseFilter.Innovation applied) {
+  void requireLatest(Innovation applied) {
     if (applied.stamp() != innovations) {
       throw new IllegalStateException(
           "a camera's innovation is applied right after it's worked out: "

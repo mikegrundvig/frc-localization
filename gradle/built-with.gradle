@@ -1,0 +1,56 @@
+// What this library was compiled against and leaves to the robot program to bring: WPILib, the
+// vendor libraries, and what comes with them (ejml, quickbuf, avaje-jsonb), each module at the
+// version this build resolved. Written into the jar as META-INF/<artifact id>/built-with.json, so a
+// robot program's build can compare them with the versions it runs (the template's
+// gradle/runtime-versions.gradle, checkRuntimeVersions), as it does the runtime's.
+//
+// The list is the modules on the compile classpath that aren't on the runtime classpath: what the
+// library compiles against (compileOnly, compileOnlyApi, or through another library's
+// compileOnlyApi) and doesn't bring. Nothing is listed by hand, so a new dependency is in it as soon
+// as it's declared. The FRC libraries themselves are left out: each says its own.
+//
+// The project says what it is before applying this file, in ext.published (gradle/publishing.gradle).
+
+// Every module a configuration resolves to, as "group:module" to its version, sorted.
+def moduleVersions = { Configuration configuration ->
+    configuration.incoming.resolutionResult.rootComponent.map { ResolvedComponentResult root ->
+        def found = new TreeMap<String, String>()
+        def seen = [] as Set
+        def todo = [root]
+        while (!todo.isEmpty()) {
+            def component = todo.pop()
+            if (!seen.add(component.id)) {
+                continue
+            }
+            def id = component.id
+            if (id instanceof ModuleComponentIdentifier && id.group != "com.michaelgrundvig.frc") {
+                found["${id.group}:${id.module}".toString()] = id.version
+            }
+            component.dependencies.each { dependency ->
+                if (dependency instanceof ResolvedDependencyResult) {
+                    todo << dependency.selected
+                }
+            }
+        }
+        found
+    }
+}
+def compiledAgainst = moduleVersions(configurations.compileClasspath)
+def brought = moduleVersions(configurations.runtimeClasspath)
+def provided = compiledAgainst.zip(brought) { compiled, runs ->
+    new TreeMap<String, String>(compiled.findAll { module, version -> !runs.containsKey(module) })
+}
+
+def builtWithDir = layout.buildDirectory.dir("generated/built-with")
+def builtWithPath = "META-INF/${published.artifactId}/built-with.json"
+def builtWith = tasks.register("builtWith") {
+    description = "Write the versions the library was compiled against and a robot program brings into its jar."
+    inputs.property("modules", provided)
+    outputs.dir(builtWithDir)
+    doLast {
+        def out = builtWithDir.get().file(builtWithPath).asFile
+        out.parentFile.mkdirs()
+        out.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([modules: provided.get()])) + "\n"
+    }
+}
+sourceSets.main.resources.srcDir(builtWith)

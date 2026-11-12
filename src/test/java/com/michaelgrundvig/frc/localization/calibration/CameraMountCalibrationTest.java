@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.within;
 
 import com.michaelgrundvig.frc.world.field.FieldModel;
 import com.michaelgrundvig.frc.world.field.Symmetry;
+import com.michaelgrundvig.frc.world.game.Rebuilt;
 import java.util.List;
 import java.util.Random;
 import org.junit.jupiter.api.Test;
@@ -21,7 +22,7 @@ import org.wpilib.math.geometry.Translation3d;
 class CameraMountCalibrationTest {
   private static final FieldModel FIELD =
       new FieldModel(
-          Fields.FRC_2026_REBUILT_WELDED.loadField(),
+          Rebuilt.GAME.layout(Fields.FRC_2026_REBUILT_WELDED.loadField()),
           Symmetry.ROTATED,
           List.of(),
           List.of(),

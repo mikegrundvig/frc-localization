@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 class ImuCrossCheckTest {
   private static final long LOOP = 20_000_000L;
 
-  private final ImuCrossCheck check = new ImuCrossCheck(ImuCrossCheck.Settings.DEFAULTS);
+  private final ImuCrossCheck check = new ImuCrossCheck(ImuCrossCheck.Settings.defaults());
   private long time;
   private double truth;
 
@@ -71,14 +71,14 @@ class ImuCrossCheckTest {
   @Test
   void settingsMustMakeSense() {
     assertThatThrownBy(() -> settings().windowSeconds(0).build())
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("Settings.windowSeconds: 0 must be positive");
     assertThatThrownBy(() -> settings().toleranceDegrees(0).build())
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("Settings.toleranceDegrees: 0 must be positive");
     assertThatThrownBy(() -> settings().scaleTolerance(-1).build())
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("Settings.scaleTolerance: -1 must be zero or more");
   }
 
   private static ImuCrossCheckSettingsBuilder settings() {
-    return ImuCrossCheckSettingsBuilder.builder(ImuCrossCheck.Settings.DEFAULTS);
+    return ImuCrossCheckSettingsBuilder.builder(ImuCrossCheck.Settings.defaults());
   }
 }

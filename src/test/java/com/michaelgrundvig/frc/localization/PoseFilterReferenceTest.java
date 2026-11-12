@@ -3,6 +3,7 @@ package com.michaelgrundvig.frc.localization;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.SplittableRandom;
 import org.junit.jupiter.api.Test;
@@ -64,8 +65,7 @@ class PoseFilterReferenceTest {
   private static final double TURN_WANDER = Math.toRadians(0.05);
 
   /** How unsure the gyro's drift starts, and how its errors wander, where they are estimated. */
-  private static final PoseFilter.GyroDoubt GYRO_DOUBT =
-      new PoseFilter.GyroDoubt(Math.toRadians(5) / 60, 3e-5, 2e-6);
+  private static final GyroDoubt GYRO_DOUBT = new GyroDoubt(Math.toRadians(5) / 60, 3e-5, 2e-6);
 
   private static final double SCALE = Math.toRadians(1) / (2 * Math.PI);
   private static final double BACKUP_SCALE = Math.toRadians(2) / (2 * Math.PI);
@@ -491,10 +491,14 @@ class PoseFilterReferenceTest {
       boolean fixesTurnHeading, boolean estimatesScale) {
     this.fixesTurnHeading = fixesTurnHeading;
     this.estimatesScale = estimatesScale;
-    PoseFilter.GyroErrors gyroErrors =
-        estimatesScale ? PoseFilter.GyroErrors.ESTIMATED : PoseFilter.GyroErrors.CONSIDERED;
-    PoseFilter.Considered considered =
-        new PoseFilter.Considered(
+    EstimatorConfig.GyroErrors gyroErrors =
+        estimatesScale
+            ? EstimatorConfig.GyroErrors.ESTIMATED
+            : EstimatorConfig.GyroErrors.CONSIDERED;
+    HeadingCorrection heading =
+        fixesTurnHeading ? HeadingCorrection.EVERY_FIX : HeadingCorrection.HEADING_MEASUREMENTS;
+    ConsideredSizes considered =
+        new ConsideredSizes(
             SCALE, BACKUP_SCALE, TURN, SHIFT, HEADING_SHIFT, TAG, SHIFT_METERS, SHIFT_RADIANS);
     double worstDifference = 0;
     double worstEigenvalue = Double.POSITIVE_INFINITY;
@@ -502,7 +506,7 @@ class PoseFilterReferenceTest {
     for (int sequence = 0; sequence < 60; sequence++) {
       SplittableRandom random = new SplittableRandom(sequence * 7919L + 1);
       PoseFilter filter =
-          new PoseFilter(considered, TAGS, fixesTurnHeading, gyroErrors, GYRO_DOUBT, TURN_WANDER);
+          new PoseFilter(considered, TAGS, heading, gyroErrors, GYRO_DOUBT, TURN_WANDER);
       assertThat(filter.consideredCount()).isEqualTo(CONSIDERED);
       assertThat(filter.uncertaintyLength()).isEqualTo(kept.length);
       double start = logUniform(random, 0.01, 100);
@@ -514,8 +518,8 @@ class PoseFilterReferenceTest {
               PoseCovariance.fromStdDevs(start, start, startHeading),
               "x"),
           0.1);
-      java.util.Arrays.fill(mean, 0);
-      java.util.Arrays.fill(turnPrior, TURN * TURN);
+      Arrays.fill(mean, 0);
+      Arrays.fill(turnPrior, TURN * TURN);
       mean[0] = 1;
       mean[1] = 2;
       mean[2] = 0.2;
@@ -555,7 +559,7 @@ class PoseFilterReferenceTest {
             tags[i] = random.nextInt(10) == 0 ? -1 : measurement.tagIds().get(i);
           }
           double yawThen = yaw - 0.01 * random.nextDouble();
-          PoseFilter.Innovation innovation = filter.innovation(measurement, yawThen, camera, tags);
+          Innovation innovation = filter.innovation(measurement, yawThen, camera, tags);
           if (innovation == null) {
             continue;
           }
@@ -671,7 +675,7 @@ class PoseFilterReferenceTest {
   void manyVerySureFixesKeepTheCovariancePositive() {
     PoseFilter filter =
         new PoseFilter(
-            new PoseFilter.Considered(
+            new ConsideredSizes(
                 SCALE, BACKUP_SCALE, TURN, SHIFT, HEADING_SHIFT, TAG, SHIFT_METERS, SHIFT_RADIANS),
             TAGS);
     filter.set(new PoseReset(0, Pose2d.ZERO, PoseCovariance.fromStdDevs(1, 1, 0.1), "x"), 0);
@@ -690,8 +694,7 @@ class PoseFilterReferenceTest {
               "camera",
               List.of(1),
               VisionMeasurement.Solver.HEADING_CONSTRAINED);
-      PoseFilter.Innovation innovation =
-          filter.innovation(sure, yaw, i % 3 == 0 ? 1 : 0, new int[] {0});
+      Innovation innovation = filter.innovation(sure, yaw, i % 3 == 0 ? 1 : 0, new int[] {0});
       if (innovation == null) {
         continue;
       }

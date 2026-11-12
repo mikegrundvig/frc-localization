@@ -6,6 +6,7 @@ import static com.michaelgrundvig.frc.world.config.Rules.positive;
 import com.michaelgrundvig.frc.world.config.Checks;
 import com.michaelgrundvig.frc.world.config.ConfigRecord;
 import com.michaelgrundvig.frc.world.robot.ImuMount;
+import com.michaelgrundvig.frc.world.robot.RobotMath;
 import org.wpilib.math.geometry.Translation3d;
 import org.wpilib.math.kinematics.ChassisVelocities;
 
@@ -113,21 +114,22 @@ public final class SlipCheck {
      * worth of it. Past 1 m/s², a bias is gravity: a Pigeon 2's is a tenth of that, and a case
      * tilted 6° on its mount leaks 1 m/s².
      */
-    public static final Settings DEFAULTS =
-        builder()
-            .windowSeconds(0.25)
-            .turnToleranceDegrees(0.5)
-            .turnScaleTolerance(0.05)
-            .speedBiasMetersPerSecSq(0.15)
-            .speedToleranceMetersPerSecond(0.3)
-            .stillMetersPerSecond(0.05)
-            .steadySeconds(2)
-            .steadyMetersPerSecond(0.1)
-            .largestBiasMetersPerSecSq(1)
-            .maxSlideMetersPerSecond(5)
-            .joltMetersPerSecSq(15)
-            .accelerometerRangeMetersPerSecSq(2 * ImuReadings.STANDARD_GRAVITY)
-            .build();
+    public static Settings defaults() {
+      return builder()
+          .windowSeconds(0.25)
+          .turnToleranceDegrees(0.5)
+          .turnScaleTolerance(0.05)
+          .speedBiasMetersPerSecSq(0.15)
+          .speedToleranceMetersPerSecond(0.3)
+          .stillMetersPerSecond(0.05)
+          .steadySeconds(2)
+          .steadyMetersPerSecond(0.1)
+          .largestBiasMetersPerSecSq(1)
+          .maxSlideMetersPerSecond(5)
+          .joltMetersPerSecSq(15)
+          .accelerometerRangeMetersPerSecSq(2 * RobotMath.GRAVITY)
+          .build();
+    }
 
     public Settings {
       Checks.on(Settings.class)
@@ -145,13 +147,15 @@ public final class SlipCheck {
           .field("accelerometerRangeMetersPerSecSq", accelerometerRangeMetersPerSecSq, positive())
           .check(
               "joltMetersPerSecSq",
-              () ->
-                  joltMetersPerSecSq < accelerometerRangeMetersPerSecSq
-                      ? null
-                      : joltMetersPerSecSq
-                          + " must be under the accelerometer's range ("
-                          + accelerometerRangeMetersPerSecSq
-                          + "), or a jolt along one axis can never pass it")
+              () -> {
+                if (joltMetersPerSecSq < accelerometerRangeMetersPerSecSq) {
+                  return null;
+                }
+                return joltMetersPerSecSq
+                    + " must be under the accelerometer's range ("
+                    + accelerometerRangeMetersPerSecSq
+                    + "), or a jolt along one axis can never pass it";
+              })
           .orThrow();
     }
 
@@ -328,6 +332,8 @@ public final class SlipCheck {
     lastVelocityY = Double.NaN;
     bias.forget();
     sinceSlideSeconds = Double.POSITIVE_INFINITY;
+    // With no comparison this loop, the wheels explain nothing and leave nothing unexplained.
+    unexplainedMetersPerSecSq = 0;
     boolean joltBySize =
         Math.hypot(forwardAccelerationMetersPerSecSq, leftAccelerationMetersPerSecSq)
                 > wholeCollisionMetersPerSecSq
@@ -495,8 +501,7 @@ public final class SlipCheck {
               velocityY - lastVelocityY,
               feltX * seconds,
               feltY * seconds,
-              (speedBiasMetersPerSecSq
-                      + 2 * ImuReadings.STANDARD_GRAVITY * Math.sin(tiltOrLevel(sample)))
+              (speedBiasMetersPerSecSq + 2 * RobotMath.GRAVITY * Math.sin(tiltOrLevel(sample)))
                   * seconds);
     }
     lastVelocityX = velocityX;

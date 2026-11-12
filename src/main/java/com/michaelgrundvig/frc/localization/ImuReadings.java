@@ -32,12 +32,6 @@ public record ImuReadings(
     double forwardAccelerationMetersPerSecSq,
     double leftAccelerationMetersPerSecSq,
     YawSamples yaws) {
-  /**
-   * Standard gravity, in m/s²: what an IMU at rest feels holding it up, and its share along the
-   * robot's axes as the robot tilts.
-   */
-  public static final double STANDARD_GRAVITY = 9.80665;
-
   /** An IMU that isn't there. */
   public static final ImuReadings NONE =
       builder()
@@ -62,6 +56,7 @@ public record ImuReadings(
   public boolean usable() {
     if (!reporting
         || !Double.isFinite(yawRadians)
+        || !Double.isFinite(yawRateRadiansPerSecond)
         || !Double.isFinite(pitchRadians)
         || !Double.isFinite(rollRadians)) {
       return false;

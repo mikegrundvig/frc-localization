@@ -62,14 +62,19 @@ class WheelAndGyroCalibrationTest {
     WheelRadiusCalibration calibration = new WheelRadiusCalibration(SQUARE);
 
     assertThatThrownBy(() -> calibration.update(0, new double[4]))
-        .isInstanceOf(IllegalStateException.class);
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("start the spin first");
     assertThatThrownBy(() -> calibration.start(0, new double[3]))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("one rotation for each wheel");
     calibration.start(0, new double[4]);
     assertThat(calibration.radiusMeters()).isNaN();
     assertThat(calibration.radiiMeters()[0]).isNaN();
+    // The wheels rotated, and the gyro saw no turn: no radius, rather than none at all.
+    calibration.update(0, new double[] {1, 1, 1, 1});
+    assertThat(calibration.radiusMeters()).as("the gyro saw no turn").isNaN();
+    assertThat(calibration.radiiMeters()[0]).as("the gyro saw no turn").isNaN();
     assertThatThrownBy(() -> new WheelRadiusCalibration(new Translation2d[] {Translation2d.ZERO}))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("a wheel can't sit at the robot's center");
   }
 
   /** Five turns counterclockwise, stopping a little past where it started. */
@@ -108,7 +113,9 @@ class WheelAndGyroCalibrationTest {
   void aGyroScaleSpinChecksItsInputs() {
     GyroScaleCalibration calibration = new GyroScaleCalibration();
 
-    assertThatThrownBy(() -> calibration.update(0)).isInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(() -> calibration.update(0))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("start the spin first");
     calibration.start(0, Rotation2d.ZERO);
     assertThat(calibration.scale()).as("not finished").isNaN();
     calibration.finish(0, Rotation2d.ZERO);

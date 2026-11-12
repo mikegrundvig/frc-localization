@@ -132,6 +132,14 @@ public record VisionMeasurement(
     tagShares = List.copyOf(shares);
   }
 
+  /**
+   * Whether its position was solved with the gyro's heading, and so leans on it: whether it has a
+   * lever other than {@link Lever#NONE}.
+   */
+  public boolean leansOnTheHeading() {
+    return !lever.equals(Lever.NONE);
+  }
+
   /** A measurement whose tags count equally in its position. */
   public VisionMeasurement(
       long timestampNanos,

@@ -14,15 +14,17 @@ import static org.wpilib.units.Units.Milliseconds;
 import com.michaelgrundvig.frc.localization.LocalizerBench.Option;
 import com.michaelgrundvig.frc.world.field.FieldModel;
 import com.michaelgrundvig.frc.world.field.Symmetry;
+import com.michaelgrundvig.frc.world.game.Rebuilt;
 import com.michaelgrundvig.frc.world.physical.Inertia;
 import com.michaelgrundvig.frc.world.robot.Body;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
-import com.michaelgrundvig.frc.world.robot.DrivetrainGeometry;
+import com.michaelgrundvig.frc.world.robot.Drivetrain;
 import com.michaelgrundvig.frc.world.robot.Gearing;
-import com.michaelgrundvig.frc.world.robot.Imus;
+import com.michaelgrundvig.frc.world.robot.ImuMount;
 import com.michaelgrundvig.frc.world.robot.Motor;
 import com.michaelgrundvig.frc.world.robot.RobotDefinition;
 import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -55,9 +57,10 @@ import org.wpilib.math.kinematics.ChassisVelocities;
  * lacks.
  */
 public abstract class LocalizerConformance {
-  private static final FieldModel FIELD =
+  /** The suite's field: 2026's, its tags where the welded field has them. */
+  static final FieldModel FIELD =
       new FieldModel(
-          Fields.FRC_2026_REBUILT_WELDED.loadField(),
+          Rebuilt.GAME.layout(Fields.FRC_2026_REBUILT_WELDED.loadField()),
           Symmetry.ROTATED,
           List.of(),
           List.of(),
@@ -65,56 +68,40 @@ public abstract class LocalizerConformance {
 
   /** A forward camera at the front of the robot, tilted up 15 degrees. */
   private static final CameraConfig FRONT =
-      CameraConfig.builder()
-          .name("front")
-          .forward(Inches.of(12))
-          .left(Inches.of(0))
-          .up(Inches.of(12))
-          .roll(Degrees.of(0))
-          .tiltUp(Degrees.of(15))
-          .yaw(Degrees.of(0))
-          .sensor(
-              CameraConfig.Sensor.builder()
-                  .widthPixels(1280)
-                  .heightPixels(800)
-                  .fieldOfView(Degrees.of(80))
-                  .fieldOfViewAcross(CameraConfig.Across.DIAGONAL)
-                  .frameRate(Hertz.of(30))
+      CameraConfig.of(
+              "front",
+              CameraConfig.ImageSensor.of(1280, 800, Hertz.of(30))
+                  .fieldOfView(Degrees.of(80), CameraConfig.Across.DIAGONAL)
                   .latency(Milliseconds.of(30))
-                  .sightRange(Meters.of(7))
-                  .build())
+                  .sightRange(Meters.of(7)))
+          .at(Inches.of(12), Inches.of(0), Inches.of(12))
+          .facing(Degrees.of(15), Degrees.of(0))
+          .roll(Degrees.of(0))
           .noiseScale(1.0)
-          .build();
+          .measured();
 
   /** A 28 x 24 in frame, 60 kg. */
   private static final Body BODY =
-      Body.builder()
-          .frameLength(Inches.of(28))
-          .frameWidth(Inches.of(24))
-          .overallHeight(Inches.of(30))
-          .bumperThickness(Inches.of(3.5))
-          .bumperBottom(Inches.of(2.5))
-          .bumperTop(Inches.of(5.75))
+      Body.frame(Inches.of(28), Inches.of(24), Inches.of(30))
+          .bumpers(Inches.of(3.5), Inches.of(2.5), Inches.of(5.75))
           .weight(Kilograms.of(60))
           .inertia(
               Body.Turning.tensor(
                   Inertia.builder().ixx(6).iyy(6).izz(6).ixy(0).ixz(0).iyz(0).build()))
-          .cg(new Translation3d(0, 0, 0.2))
-          .build();
+          .cg(new Translation3d(0, 0, 0.2));
 
   /** The suite's robot: a 28 x 24 in swerve drive with the front camera. */
-  private static final RobotDefinition ROBOT =
-      RobotDefinition.builder()
-          .name("conformance")
-          .body(BODY)
-          .drivetrain(
-              DrivetrainGeometry.inset(
-                  DrivetrainGeometry.ModuleType.builder()
+  static final RobotDefinition ROBOT =
+      RobotDefinition.of(
+              "conformance",
+              BODY,
+              Drivetrain.inset(
+                  Drivetrain.Module.builder()
                       .driveMotor(Motor.KRAKEN_X60)
                       .steerMotor(Motor.KRAKEN_X44)
                       .wheelRadius(Inches.of(2))
-                      .driveGearing(Gearing.builder().ratio(6.75).efficiency(1.0).build())
-                      .steerGearing(Gearing.builder().ratio(12.8).efficiency(1.0).build())
+                      .driveGearing(Gearing.of(6.75))
+                      .steerGearing(Gearing.of(12.8))
                       .couplingRatio(0)
                       .wheelCoefficientOfFriction(1.2)
                       .driveInertia(KilogramSquareMeters.of(0.001))
@@ -122,9 +109,8 @@ public abstract class LocalizerConformance {
                       .build(),
                   BODY,
                   Inches.of(2.625)))
-          .imus(Imus.UNCHECKED)
-          .cameras(List.of(FRONT))
-          .build();
+          .withCameras(FRONT)
+          .withBackupImu(ImuMount.UNCHECKED);
 
   /** Where the robot starts: on open floor, with room to drive two meters any way. */
   private static final Pose2d START = new Pose2d(4, 4, Rotation2d.fromDegrees(20));
@@ -151,6 +137,23 @@ public abstract class LocalizerConformance {
 
   protected LocalizerConformance(LocalizerBench bench) {
     this.bench = bench;
+  }
+
+  // ---- Frames, units and time ----
+
+  /** L1. */
+  @Test
+  void l1_thePoseIsTheRobotsCenterSeenFromACameraOffIt() {
+    Run run = placed();
+    // Measurements of where the robot's center is, each from a camera 30 cm ahead of it and 20 cm
+    // to its left: a localizer that took them for the camera's place would stand 36 cm off.
+    for (int loop = 0; loop < 100; loop++) {
+      run.loop(new ChassisVelocities(1, 0, 0.5));
+      run.localizer.measurements(
+          List.of(leaning(run.robot.now(), run.robot.truth(), 0.05, OFF_CENTER)));
+    }
+
+    assertNear(run.localizer.pose(), run.robot.truth());
   }
 
   // ---- The pose ----
@@ -199,6 +202,44 @@ public abstract class LocalizerConformance {
     }
   }
 
+  /** L4. */
+  @Test
+  void l4_aWheelReadingTakenTwiceOrOutOfOrderRunsNothingBackwards() {
+    Run run = placed();
+    Run twin = placed();
+    for (int loop = 0; loop < 50; loop++) {
+      ChassisVelocities toward = new ChassisVelocities(1, 0, 0.5);
+      DrivetrainReadings readings = run.robot.loop(toward);
+      twin.loop(toward);
+      twin.close();
+      // Each loop's readings taken in twice, and then a reading from a loop before them.
+      run.localizer.odometry(readings, new LoopContext(run.robot.now(), true));
+      run.localizer.odometry(readings, new LoopContext(run.robot.now(), true));
+      run.localizer.odometry(
+          DrivetrainReadingsBuilder.builder(readings)
+              .wheels(List.of(aLoopBefore(readings.wheels().get(0))))
+              .build(),
+          new LoopContext(run.robot.now(), true));
+      run.close();
+
+      assertThat(run.localizer.timestampNanos())
+          .as("loop %d: the newest reading's time", loop)
+          .isEqualTo(twin.localizer.timestampNanos());
+      assertNear(run.localizer.pose(), twin.localizer.pose());
+    }
+  }
+
+  /** A wheel reading a loop before this one, the wheels a little less far along. */
+  private static OdometrySample aLoopBefore(OdometrySample sample) {
+    double[] distances = new double[sample.wheels()];
+    double[] angles = new double[sample.wheels()];
+    for (int wheel = 0; wheel < sample.wheels(); wheel++) {
+      distances[wheel] = sample.distanceMeters(wheel) - 0.02;
+      angles[wheel] = sample.angleRadians(wheel);
+    }
+    return new OdometrySample(sample.timestampNanos() - LOOP_NANOS, distances, angles);
+  }
+
   /** L5. */
   @Test
   void l5_thePoseAtAMomentReachesBackHalfASecondAndNoFartherThanItKeeps() {
@@ -222,6 +263,31 @@ public abstract class LocalizerConformance {
         .as("a minute before it started")
         .isEmpty();
     assertThat(run.localizer.poseAt(newest + 5_000_000_000L)).as("five seconds from now").isEmpty();
+  }
+
+  /** L5. */
+  @Test
+  void l5_thePoseAtAMomentBeforeTheLastPlacementIsEmpty() {
+    Run run = placed();
+    for (int loop = 0; loop < 50; loop++) {
+      run.loop(new ChassisVelocities(1, 0, 0.5));
+      run.close();
+    }
+    long placedNanos = run.robot.now();
+    run.localizer.place(
+        new PoseReset(
+            placedNanos, new Pose2d(7, 2, Rotation2d.fromDegrees(-100)), PLACED, "elsewhere"));
+    for (int loop = 0; loop < 10; loop++) {
+      run.loop(new ChassisVelocities(1, 0, 0.5));
+      run.close();
+    }
+
+    assertThat(run.localizer.poseAt(placedNanos - 5 * LOOP_NANOS))
+        .as("a tenth of a second before the robot was placed")
+        .isEmpty();
+    assertThat(run.localizer.poseAt(run.localizer.timestampNanos()))
+        .as("now")
+        .hasValueSatisfying(pose -> assertSame(pose, run.localizer.pose()));
   }
 
   // ---- Odometry ----
@@ -415,32 +481,35 @@ public abstract class LocalizerConformance {
   /** L11, L12. */
   @Test
   void l11_aMeasurementThatAgreesIsUsedAndNeverOvershot() {
-    Run run = placed();
-    for (int loop = 0; loop < 10; loop++) {
-      run.loop(new ChassisVelocities());
-      run.close();
-    }
-    // Three centimeters off, from a measurement sure to five: within its own uncertainty.
-    Transform2d off = new Transform2d(0.03, 0, Rotation2d.ZERO);
-    Pose2d measured = run.robot.truth().plus(off);
-    double before = distance(run.localizer.pose(), measured);
+    for (Shape shape : Shape.values()) {
+      Run run = placed();
+      for (int loop = 0; loop < 10; loop++) {
+        run.loop(new ChassisVelocities());
+        run.close();
+      }
+      // Three centimeters off, from a measurement sure to five: within its own uncertainty.
+      Transform2d off = new Transform2d(0.03, 0, Rotation2d.ZERO);
+      Pose2d measured = run.robot.truth().plus(off);
+      double before = distance(run.localizer.pose(), measured);
 
-    double last = before;
-    for (int loop = 0; loop < 100; loop++) {
-      run.loop(new ChassisVelocities());
-      Pose2d held = run.localizer.pose();
-      run.measure(off, 0.05, 0);
-      run.close();
-      double now = distance(run.localizer.pose(), measured);
-      // L12: never away from the measurement, and never past it.
-      assertThat(now).as("loop %d: toward the measurement", loop).isLessThanOrEqualTo(last + SAME);
-      assertThat(distance(run.localizer.pose(), held))
-          .as("loop %d: no farther than the measurement", loop)
-          .isLessThanOrEqualTo(distance(held, measured) + SAME);
-      last = now;
-    }
+      double last = before;
+      for (int loop = 0; loop < 100; loop++) {
+        run.loop(new ChassisVelocities());
+        Pose2d held = run.localizer.pose();
+        run.localizer.measurements(List.of(shape.of(run.robot.now(), measured, 0.05)));
+        double now = distance(run.localizer.pose(), measured);
+        // L12: never away from the measurement, and never past it.
+        assertThat(now)
+            .as("%s, loop %d: toward the measurement", shape, loop)
+            .isLessThanOrEqualTo(last + SAME);
+        assertThat(distance(run.localizer.pose(), held))
+            .as("%s, loop %d: no farther than the measurement", shape, loop)
+            .isLessThanOrEqualTo(distance(held, measured) + SAME);
+        last = now;
+      }
 
-    assertThat(last).as("the estimate closes on it").isLessThan(before / 2);
+      assertThat(last).as("%s: the estimate closes on it", shape).isLessThan(before / 2);
+    }
   }
 
   /** L13. */
@@ -494,7 +563,7 @@ public abstract class LocalizerConformance {
         .isLessThan(1e-3);
   }
 
-  /** L15, L16. */
+  /** L16. */
   @Test
   void l16_measurementsOutOfOrderTooOldOrFromTheFutureCostNothingButThemselves() {
     Localizer fresh = bench.make(ROBOT, FIELD);
@@ -520,6 +589,7 @@ public abstract class LocalizerConformance {
                     List.of(
                         // Newest first, which is not the order they were taken in.
                         measurement(now, truth, 0.05, 0.05),
+                        leaning(now - LOOP_NANOS, truth, 0.05, OFF_CENTER),
                         measurement(now - 2 * LOOP_NANOS, truth, 0.05, 0.05),
                         // Ten minutes old: older than any localizer keeps.
                         measurement(1, farOff, 0.05, 0.05),
@@ -531,6 +601,78 @@ public abstract class LocalizerConformance {
     assertThat(distance(run.localizer.pose(), before))
         .as("the old one, three meters off, moved nothing")
         .isLessThan(0.1);
+  }
+
+  /** L15. */
+  @Test
+  void l15_aLoopsMeasurementsGiveTheSamePoseInAnyOrder() {
+    Run inOrder = placed();
+    Run reversed = placed();
+    for (Run run : List.of(inOrder, reversed)) {
+      for (int loop = 0; loop < 25; loop++) {
+        run.loop(new ChassisVelocities(1, 0, 0.5));
+        run.close();
+      }
+    }
+    // Three measurements a loop, each a few centimeters off a different way, taken a loop apart.
+    for (int loop = 0; loop < 3; loop++) {
+      List<VisionMeasurement> taken = new ArrayList<>();
+      for (Run run : List.of(inOrder, reversed)) {
+        run.loop(new ChassisVelocities(1, 0, 0.5));
+      }
+      long now = inOrder.robot.now();
+      Pose2d truth = inOrder.robot.truth();
+      taken.add(measurement(now - 2 * LOOP_NANOS, truth.plus(offBy(0.04, 0)), 0.05, 0.05));
+      taken.add(measurement(now - LOOP_NANOS, truth.plus(offBy(0, 0.04)), 0.05, 0.05));
+      taken.add(measurement(now, truth.plus(offBy(-0.03, 0.03)), 0.05, 0.05));
+      inOrder.localizer.measurements(List.copyOf(taken));
+      reversed.localizer.measurements(List.copyOf(taken.reversed()));
+
+      assertSame(reversed.localizer.pose(), inOrder.localizer.pose());
+    }
+    assertThat(distance(inOrder.localizer.pose(), inOrder.robot.truth()))
+        .as("the measurements moved the estimate")
+        .isGreaterThan(1e-3);
+  }
+
+  private static Transform2d offBy(double x, double y) {
+    return new Transform2d(x, y, Rotation2d.ZERO);
+  }
+
+  /** L16. */
+  @Test
+  void l16_aMeasurementThatIsntANumberCostsNothingButItself() {
+    Run run = placed();
+    for (int loop = 0; loop < 50; loop++) {
+      run.loop(new ChassisVelocities(1, 0, 0.5));
+      run.close();
+    }
+    for (int loop = 0; loop < 10; loop++) {
+      run.loop(new ChassisVelocities(1, 0, 0.5));
+      long now = run.robot.now();
+      Pose2d truth = run.robot.truth();
+      Pose2d before = run.localizer.pose();
+      List<VisionMeasurement> spoiled =
+          List.of(
+              measurement(
+                  now, new Pose2d(Double.NaN, truth.getY(), truth.getRotation()), 0.05, 0.05),
+              measurement(
+                  now,
+                  new Pose2d(truth.getX(), Double.POSITIVE_INFINITY, truth.getRotation()),
+                  0.05,
+                  0.05),
+              measurement(
+                  now, new Pose2d(truth.getTranslation(), new Rotation2d(Double.NaN)), 0.05, 0.05),
+              leaning(
+                  now, new Pose2d(Double.NaN, Double.NaN, truth.getRotation()), 0.05, OFF_CENTER));
+
+      assertThatCode(() -> run.localizer.measurements(spoiled))
+          .as("loop %d", loop)
+          .doesNotThrowAnyException();
+      assertNumbers(run.localizer.pose());
+      assertSame(run.localizer.pose(), before);
+    }
+    assertNear(run.localizer.pose(), run.robot.truth());
   }
 
   // ---- Cost ----
@@ -565,6 +707,47 @@ public abstract class LocalizerConformance {
         .isLessThan(1.5 * earlier + 1024);
   }
 
+  /** L17. */
+  @Test
+  void l17_whatALocalizerKeepsDoesNotGrowWithHowLongTheRobotHasRun() {
+    Run run = placed();
+    int loopsABatch = 3000;
+    // The first batch fills what it keeps. A minute of loops then stands beside the minute after.
+    long[] kept = new long[3];
+    for (int batch = 0; batch < kept.length; batch++) {
+      for (int loop = 0; loop < loopsABatch; loop++) {
+        run.loop(new ChassisVelocities(0.5, 0, 1.0));
+        run.measure(Transform2d.ZERO, 0.05, LOOP_NANOS);
+        run.close();
+      }
+      kept[batch] = heapAfterCollecting();
+    }
+
+    long grown = kept[2] - kept[1];
+    assertThat(grown)
+        .as("bytes kept, a minute later (%d then, %d now)", kept[1], kept[2])
+        .isLessThan(RETAINED_SLACK_BYTES);
+    assertThat(run.localizer.poseAt(run.localizer.timestampNanos() - 10_000_000_000L))
+        .as("ten seconds back: longer ago than it keeps")
+        .isEmpty();
+  }
+
+  /**
+   * How far the heap the program holds may grow between two equal minutes, in bytes, for what the
+   * test program itself keeps: it grows by about 4 kB. A localizer that kept as little as a pose a
+   * loop, about 100 bytes, would keep nearly five times this in a minute.
+   */
+  private static final long RETAINED_SLACK_BYTES = 64 * 1024;
+
+  /** The bytes the heap holds once the collector has let go of everything it can. */
+  private static long heapAfterCollecting() {
+    MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
+    // Twice: objects the first collection finalized or cleared references for go in the second.
+    System.gc();
+    System.gc();
+    return memory.getHeapMemoryUsage().getUsed();
+  }
+
   // ---- The options ----
 
   /** L18. */
@@ -592,23 +775,39 @@ public abstract class LocalizerConformance {
 
   /** L19. */
   @Test
-  void l19_theCovarianceGrowsWhileOnlyOdometryComesIn() {
+  void l19_theCovarianceGrowsWhileOnlyOdometryComesInAndHoldsTheRealError() {
     needs(Option.COVARIANCE);
     Run run = placed();
+    // Wheels worn three percent smaller than the robot is told: odometry runs three percent long,
+    // an error the localizer can't see, and one its uncertainty must hold.
+    run.robot.wheelScale = 1.03;
     run.loop(new ChassisVelocities());
     run.close();
     double before = run.localizer.covariance().orElseThrow().largestPositionStdDev();
 
-    for (int loop = 0; loop < 250; loop++) {
+    int heldLoops = 0;
+    int loops = 250;
+    for (int loop = 0; loop < loops; loop++) {
       run.loop(new ChassisVelocities(1.5, 0, 1.0));
       run.close();
+      double claimed = run.localizer.covariance().orElseThrow().largestPositionStdDev();
+      if (distance(run.localizer.pose(), run.robot.truth()) <= 2 * claimed) {
+        heldLoops++;
+      }
     }
 
     double after = run.localizer.covariance().orElseThrow().largestPositionStdDev();
+    double error = distance(run.localizer.pose(), run.robot.truth());
     assertThat(after).as("five seconds of driving on the wheels alone").isGreaterThan(before);
-    assertThat(distance(run.localizer.pose(), run.robot.truth()))
-        .as("and the error stays within what it claims, four times over")
-        .isLessThan(4 * after + ODOMETRY_METERS);
+    assertThat(error).as("odometry three percent long, over 7 m of turning").isGreaterThan(0.03);
+    assertThat(heldLoops)
+        .as(
+            "loops whose error was within twice what it claimed (%.3f m off, %.3f claimed)",
+            error, after)
+        .isGreaterThanOrEqualTo(loops * 95 / 100);
+    assertThat(after)
+        .as("what it claims is the error's size, not far beyond it (%.3f m off)", error)
+        .isLessThan(20 * error);
   }
 
   /** L20. */
@@ -633,12 +832,12 @@ public abstract class LocalizerConformance {
 
   /** L21. */
   @Test
-  void l21_thereIsADecisionForEachMeasurementGiven() {
-    needs(Option.DECISIONS);
+  void l21_thereIsAVerdictForEachMeasurementGiven() {
+    needs(Option.VERDICTS);
     Run run = placed();
     run.loop(new ChassisVelocities());
     run.close();
-    assertThat(run.localizer.decisions().orElseThrow()).as("given none").isEmpty();
+    assertThat(run.localizer.verdicts().orElseThrow()).as("given none").isEmpty();
 
     run.loop(new ChassisVelocities());
     List<VisionMeasurement> taken =
@@ -648,8 +847,8 @@ public abstract class LocalizerConformance {
             measurement(1, run.robot.truth(), 0.05, 0.05));
     run.localizer.measurements(taken);
 
-    assertThat(run.localizer.decisions().orElseThrow())
-        .extracting(VisionDecision::measurement)
+    assertThat(run.localizer.verdicts().orElseThrow())
+        .extracting(MeasurementVerdict::measurement)
         .containsExactlyInAnyOrderElementsOf(taken);
   }
 
@@ -744,13 +943,55 @@ public abstract class LocalizerConformance {
         VisionMeasurement.Solver.MULTI_TAG);
   }
 
+  /** Where the suite's off-center camera sits on the robot: 30 cm ahead and 20 cm to the left. */
+  private static final Translation2d OFF_CENTER = new Translation2d(0.3, 0.2);
+
+  /**
+   * A measurement from one tag 2.5 m ahead of the robot, solved with the gyro's heading: its
+   * position leans on that heading, from a camera this far off the robot's center, and it says
+   * nothing of the heading.
+   *
+   * @param camera where the camera sits on the robot, in the robot's frame
+   */
+  private static VisionMeasurement leaning(
+      long takenNanos, Pose2d pose, double stdDevMeters, Translation2d camera) {
+    Rotation2d heading = Rotation2d.ZERO;
+    if (Double.isFinite(pose.getRotation().getRadians())) {
+      heading = pose.getRotation();
+    }
+    return new VisionMeasurement(
+        takenNanos,
+        pose,
+        PoseCovariance.fromStdDevs(stdDevMeters, stdDevMeters, Double.POSITIVE_INFINITY),
+        new VisionMeasurement.Lever(
+            heading, new Translation2d(2.5, 0).rotateBy(heading), camera.rotateBy(heading)),
+        FRONT.name(),
+        List.of(26),
+        VisionMeasurement.Solver.HEADING_CONSTRAINED);
+  }
+
+  /** The two shapes of measurement a localizer is given, each as the suite makes one. */
+  private enum Shape {
+    /** Two tags, solved at once, with a heading of its own: {@link #measurement}. */
+    MULTI_TAG,
+    /** One tag, solved with the gyro's heading, from an off-center camera: {@link #leaning}. */
+    LEANING_ON_ONE_TAG;
+
+    VisionMeasurement of(long takenNanos, Pose2d pose, double stdDevMeters) {
+      return switch (this) {
+        case MULTI_TAG -> measurement(takenNanos, pose, stdDevMeters, stdDevMeters);
+        case LEANING_ON_ONE_TAG -> leaning(takenNanos, pose, stdDevMeters, OFF_CENTER);
+      };
+    }
+  }
+
   /** What a localizer reports for an option, whatever its type. */
   private static Optional<?> reported(Localizer localizer, Option option) {
     return switch (option) {
       case COVARIANCE -> localizer.covariance();
       case MODE -> localizer.mode();
       case HEALTH -> localizer.health();
-      case DECISIONS -> localizer.decisions();
+      case VERDICTS -> localizer.verdicts();
       case FIELD_VELOCITIES -> localizer.fieldVelocities();
       case WHEELS -> localizer.wheels();
       case TRUST -> localizer.trust();

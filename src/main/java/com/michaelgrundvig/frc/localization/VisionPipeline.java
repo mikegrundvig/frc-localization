@@ -38,6 +38,13 @@ import org.wpilib.math.geometry.Translation2d;
  * turning and the solution fitting well; otherwise the gyro keeps heading to itself. Everything
  * thrown out says why, as a {@link Verdict}.
  *
+ * <p>Each tag is held to the distance limits on its own: a tag too far, or nearer than any real
+ * view, is left out and the image solved from the rest, so a far tag beside a near one costs only
+ * itself. So is a tag the field's layout doesn't have, and one the vision software sent without a
+ * pose. Each tag left out says why ({@link ImageVerdict#leftOutTags}). An image left with no tag to
+ * solve says which cause it was: nothing in view, tags off the layout, or tags without poses (from
+ * Visor without a lens calibration, or seen edge-on), naming the tags.
+ *
  * <p>A task may trust only some tags ({@link TagAllowlist}): the image is solved from those alone,
  * and the vision software's multi-tag solution only if it used no others.
  *
@@ -62,46 +69,72 @@ public final class VisionPipeline {
    *     its configuration says
    * @param onlyTags the tags the current task trusts; null for every tag
    */
-  public record Trust(double mountDoubtMeters, @Nullable TagAllowlist onlyTags) {
+  public record Terms(double mountDoubtMeters, @Nullable TagAllowlist onlyTags) {
     /** A camera where its configuration says, and every tag. */
-    public static final Trust FULL = new Trust(0, null);
+    public static final Terms AS_CONFIGURED = new Terms(0, null);
 
-    public Trust {
+    public Terms {
       if (!(mountDoubtMeters >= 0) || Double.isInfinite(mountDoubtMeters)) {
         throw new IllegalArgumentException("a mount's doubt is zero or more: " + mountDoubtMeters);
       }
     }
   }
 
-  /** One image, and what it's solved with: its camera's mount on the robot as it was taken. */
+  /**
+   * One image, and what it's solved with: its camera's mount on the robot as it was taken. Its tags
+   * left out of the solve, each with why, are gathered as it's solved.
+   */
   private record Image(
       TagDetections seen,
       CameraConfig camera,
       Transform3d mount,
       CaptureContext robot,
       VisionConfig config,
-      double mountDoubtMeters) {
+      double mountDoubtMeters,
+      List<TagVerdict> leftOut) {
+    Image(
+        TagDetections seen,
+        CameraConfig camera,
+        Transform3d mount,
+        CaptureContext robot,
+        VisionConfig config,
+        double mountDoubtMeters) {
+      this(seen, camera, mount, robot, config, mountDoubtMeters, new ArrayList<>());
+    }
+
+    /** Leaves one of the image's tags out of the solve, and says why. */
+    void leaveOut(int tag, Verdict why, double value, double threshold) {
+      leftOut.add(
+          TagVerdict.builder().tag(tag).verdict(why).value(value).threshold(threshold).build());
+    }
+
     /**
      * How much a result's uncertainty grows from the one-tag-at-one-meter baseline: with distance,
      * fewer tags, the camera's own noise, and the robot's motion.
      */
     double scale(int tags, double distance) {
-      double motion =
-          1
-              + config.speedStdDevFactor() * robot.speedMetersPerSecond()
-              + config.yawRateStdDevFactor() * robot.recentYawRateRadiansPerSecond();
-      return Math.pow(distance, config.distanceExponent()) / tags * camera.noiseScale() * motion;
+      return Math.pow(distance, config.distanceExponent())
+          / tags
+          * camera.noiseScaleOrDefault()
+          * motion();
+    }
+
+    /** How much the robot's motion as the image was taken grows its uncertainty: one standing. */
+    double motion() {
+      return 1
+          + config.speedStdDevFactor() * robot.speedMetersPerSecond()
+          + config.yawRateStdDevFactor() * robot.recentYawRateRadiansPerSecond();
     }
   }
 
   /** What to make of one image from a camera on the chassis, where its configuration mounts it. */
-  public VisionResult process(
+  public ImageVerdict process(
       TagDetections seen,
       CameraConfig camera,
       CaptureContext robot,
       VisionConfig config,
-      Trust trust) {
-    return process(seen, camera, camera.robotToCamera(), robot, config, trust);
+      Terms terms) {
+    return process(seen, camera, camera.robotToCamera(), robot, config, terms);
   }
 
   /**
@@ -110,20 +143,20 @@ public final class VisionPipeline {
    *
    * @param mount the camera's pose in the robot's frame as the image was taken
    */
-  public VisionResult process(
+  public ImageVerdict process(
       TagDetections seen,
       CameraConfig camera,
       Transform3d mount,
       CaptureContext robot,
       VisionConfig config,
-      Trust trust) {
-    TagAllowlist onlyTags = trust.onlyTags();
+      Terms terms) {
+    TagAllowlist onlyTags = terms.onlyTags();
     if (onlyTags == null) {
-      return solve(new Image(seen, camera, mount, robot, config, trust.mountDoubtMeters()));
+      return solve(new Image(seen, camera, mount, robot, config, terms.mountDoubtMeters()));
     }
     TagDetections trusted = trusted(seen, onlyTags);
     if (trusted.tags().isEmpty() && !seen.tags().isEmpty()) {
-      return new VisionResult(
+      return new ImageVerdict(
           seen,
           null,
           Verdict.UNTRUSTED_TAGS,
@@ -131,9 +164,10 @@ public final class VisionPipeline {
           Double.NaN,
           Double.NaN,
           Double.NaN,
-          Double.NaN);
+          Double.NaN,
+          List.of());
     }
-    return solve(new Image(trusted, camera, mount, robot, config, trust.mountDoubtMeters()));
+    return solve(new Image(trusted, camera, mount, robot, config, terms.mountDoubtMeters()));
   }
 
   /**
@@ -141,59 +175,80 @@ public final class VisionPipeline {
    * solution only if that used no others.
    */
   private static TagDetections trusted(TagDetections seen, TagAllowlist onlyTags) {
-    List<TagDetections.Tag> tags =
+    List<TagDetections.Sighting> tags =
         seen.tags().stream().filter(tag -> onlyTags.allows(tag.id())).toList();
     TagDetections.MultiTag multiTag = seen.multiTag();
     boolean allTrusted = multiTag != null && multiTag.tagIds().stream().allMatch(onlyTags::allows);
+    List<Integer> unsolved = seen.unsolvedTags().stream().filter(onlyTags::allows).toList();
     return new TagDetections(
-        seen.timestampNanos(), seen.camera(), tags, allTrusted ? multiTag : null);
+        seen.timestampNanos(), seen.camera(), tags, allTrusted ? multiTag : null, unsolved);
   }
 
   /**
    * Solves an image, by the first of the three ways that applies (the class comment says which and
    * why), or refuses it.
    */
-  private VisionResult solve(Image image) {
+  private ImageVerdict solve(Image image) {
     TagDetections seen = image.seen();
     CaptureContext robot = image.robot();
     VisionConfig config = image.config();
-    List<TagDetections.Tag> known = tagsTheFieldHas(seen);
+    Verdict unsolved = whyUnsolved(image.camera());
+    for (int id : seen.unsolvedTags()) {
+      image.leaveOut(id, unsolved, Double.NaN, Double.NaN);
+    }
+    if (seen.tags().isEmpty()) {
+      return noTagSolved(image, unsolved);
+    }
+    List<TagDetections.Sighting> known = tagsTheFieldHas(image);
     if (known.isEmpty()) {
-      return rejected(seen, Verdict.UNKNOWN_TAGS, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+      return rejected(
+          image,
+          Verdict.UNKNOWN_TAGS,
+          tagsNamed(ids(seen.tags()))
+              + (seen.tags().size() == 1 ? " isn't" : " aren't")
+              + " in this field's layout",
+          Double.NaN,
+          Double.NaN);
     }
     double distance = averageDistance(known);
     if (!Double.isFinite(distance)) {
       return rejected(
-          seen, Verdict.TAG_NOT_A_NUMBER, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+          image, Verdict.TAG_NOT_A_NUMBER, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+    }
+    // A speed or turn rate that isn't a number would make an uncertainty that isn't one either.
+    if (!Double.isFinite(image.motion())) {
+      return rejected(
+          image, Verdict.MOTION_NOT_A_NUMBER, Double.NaN, Double.NaN, distance, Double.NaN);
     }
     if (robot.recentYawRateRadiansPerSecond() > config.maxYawRateRadiansPerSecond()) {
       return rejected(
-          seen,
+          image,
           Verdict.TURNING,
           robot.recentYawRateRadiansPerSecond(),
           config.maxYawRateRadiansPerSecond(),
           distance,
           Double.NaN);
     }
-    if (distance > config.maxDistanceMeters()) {
-      return rejected(
-          seen, Verdict.TOO_FAR, distance, config.maxDistanceMeters(), distance, Double.NaN);
+    List<TagDetections.Sighting> inReach = tagsInReach(image, known);
+    if (inReach.isEmpty()) {
+      return noTagInReach(image, distance);
     }
+    distance = averageDistance(inReach);
 
     // The gyro's heading solves the image only while the estimate is sure of it.
     Rotation2d heading = robot.heading();
     if (heading != null && robot.headingStdDevRadians() <= config.maxHeadingStdDevToConstrain()) {
-      return headingConstrained(image, known, heading, distance);
+      return headingConstrained(image, inReach, heading, distance);
     }
     TagDetections.MultiTag multiTag = seen.multiTag();
     if (multiTag != null) {
       Pose3d pose = robotFromMultiTag(multiTag, image.mount());
-      return fullPose(image, pose, known, distance, VisionMeasurement.Solver.MULTI_TAG);
+      return fullPose(image, pose, inReach, distance, VisionMeasurement.Solver.MULTI_TAG);
     }
-    TagDetections.Tag clearest = leastAmbiguous(known);
+    TagDetections.Sighting clearest = leastAmbiguous(inReach);
     if (clearest.ambiguity() > config.maxAmbiguity()) {
       return rejected(
-          seen,
+          image,
           Verdict.AMBIGUOUS,
           clearest.ambiguity(),
           config.maxAmbiguity(),
@@ -211,30 +266,138 @@ public final class VisionPipeline {
         VisionMeasurement.Solver.SINGLE_TAG);
   }
 
-  /** The tags in an image that the field's layout has: only those can place the robot. */
-  private List<TagDetections.Tag> tagsTheFieldHas(TagDetections seen) {
-    List<TagDetections.Tag> known = new ArrayList<>();
-    for (TagDetections.Tag tag : seen.tags()) {
+  /**
+   * Why a camera's tags came without poses: it has no lens calibration, on Visor, which then sends
+   * corners alone; or, calibrated, it saw them too edge-on or too small to solve.
+   */
+  private static Verdict whyUnsolved(CameraConfig camera) {
+    boolean withoutALens =
+        camera.software() instanceof CameraConfig.Software.Visor visor && visor.lens().isEmpty();
+    if (withoutALens) {
+      return Verdict.NO_LENS;
+    }
+    return Verdict.UNSOLVED_TAGS;
+  }
+
+  /**
+   * An image with no tag solved: one that saw none, or whose tags came without poses, which names
+   * them, so the camera's log says which it saw.
+   */
+  private static ImageVerdict noTagSolved(Image image, Verdict unsolved) {
+    List<Integer> ids = image.seen().unsolvedTags();
+    if (ids.isEmpty()) {
+      return rejected(image, Verdict.NO_TAGS, Double.NaN, Double.NaN, Double.NaN, Double.NaN);
+    }
+    String said = "saw " + tagsNamed(ids) + " too edge-on or too small to solve";
+    if (unsolved == Verdict.NO_LENS) {
+      said =
+          "saw "
+              + tagsNamed(ids)
+              + " and has no lens calibration to solve them: Visor sends corners and no poses"
+              + " without one (docs/visor.md)";
+    }
+    return rejected(image, unsolved, said, Double.NaN, Double.NaN);
+  }
+
+  /**
+   * The tags near enough to place the robot well and far enough to be real views: the others are
+   * left out of the image, each with its distance and the limit it passed. A far tag beside a near
+   * one costs only itself, and a tag a coprocessor put at the camera (its zero for no pose) can't
+   * claim a near-perfect fix for the rest.
+   */
+  private static List<TagDetections.Sighting> tagsInReach(
+      Image image, List<TagDetections.Sighting> known) {
+    VisionConfig config = image.config();
+    List<TagDetections.Sighting> inReach = new ArrayList<>(known.size());
+    for (TagDetections.Sighting tag : known) {
+      double distance = tag.bestCameraToTag().getTranslation().getNorm();
+      if (distance > config.maxDistanceMeters()) {
+        image.leaveOut(tag.id(), Verdict.TOO_FAR, distance, config.maxDistanceMeters());
+        continue;
+      }
+      // Tags nearer than this are a misread (a coprocessor's zero for no pose, say): the
+      // uncertainty, which shrinks with the distance, would claim a near-perfect fix.
+      if (distance < config.minDistanceMeters()) {
+        image.leaveOut(tag.id(), Verdict.TOO_CLOSE, distance, config.minDistanceMeters());
+        continue;
+      }
+      inReach.add(tag);
+    }
+    return inReach;
+  }
+
+  /**
+   * An image none of whose tags was in reach. Too far, by the nearest tag's distance, if any tag
+   * was too far; too close otherwise, by the farthest one's.
+   *
+   * @param distance the tags' average distance from the camera
+   */
+  private static ImageVerdict noTagInReach(Image image, double distance) {
+    double nearestTooFar = Double.POSITIVE_INFINITY;
+    double farthestTooClose = 0;
+    for (TagVerdict tag : image.leftOut()) {
+      if (tag.verdict() == Verdict.TOO_FAR) {
+        nearestTooFar = Math.min(nearestTooFar, tag.value());
+      }
+      if (tag.verdict() == Verdict.TOO_CLOSE) {
+        farthestTooClose = Math.max(farthestTooClose, tag.value());
+      }
+    }
+    VisionConfig config = image.config();
+    if (nearestTooFar < Double.POSITIVE_INFINITY) {
+      return rejected(
+          image, Verdict.TOO_FAR, nearestTooFar, config.maxDistanceMeters(), distance, Double.NaN);
+    }
+    return rejected(
+        image,
+        Verdict.TOO_CLOSE,
+        farthestTooClose,
+        config.minDistanceMeters(),
+        distance,
+        Double.NaN);
+  }
+
+  /** Tags by their numbers, in words: "tag 7", "tags 31, 32". */
+  private static String tagsNamed(List<Integer> ids) {
+    StringBuilder named = new StringBuilder(ids.size() == 1 ? "tag " : "tags ");
+    for (int i = 0; i < ids.size(); i++) {
+      if (i > 0) {
+        named.append(", ");
+      }
+      named.append(ids.get(i));
+    }
+    return named.toString();
+  }
+
+  /**
+   * The tags in an image that the field's layout has: only those can place the robot. The others
+   * are left out of it.
+   */
+  private List<TagDetections.Sighting> tagsTheFieldHas(Image image) {
+    List<TagDetections.Sighting> known = new ArrayList<>();
+    for (TagDetections.Sighting tag : image.seen().tags()) {
       if (field.tag(tag.id()).isPresent()) {
         known.add(tag);
+      } else {
+        image.leaveOut(tag.id(), Verdict.UNKNOWN_TAGS, Double.NaN, Double.NaN);
       }
     }
     return known;
   }
 
   /** How far the tags are from the camera, on average, by each one's best pose. */
-  private static double averageDistance(List<TagDetections.Tag> tags) {
+  private static double averageDistance(List<TagDetections.Sighting> tags) {
     double sum = 0;
-    for (TagDetections.Tag tag : tags) {
+    for (TagDetections.Sighting tag : tags) {
       sum += tag.bestCameraToTag().getTranslation().getNorm();
     }
     return sum / tags.size();
   }
 
   /** The tag whose two possible poses are furthest from equally likely. The first, if they tie. */
-  private static TagDetections.Tag leastAmbiguous(List<TagDetections.Tag> tags) {
-    TagDetections.Tag clearest = tags.get(0);
-    for (TagDetections.Tag tag : tags) {
+  private static TagDetections.Sighting leastAmbiguous(List<TagDetections.Sighting> tags) {
+    TagDetections.Sighting clearest = tags.get(0);
+    for (TagDetections.Sighting tag : tags) {
       if (tag.ambiguity() < clearest.ambiguity()) {
         clearest = tag;
       }
@@ -303,8 +466,8 @@ public final class VisionPipeline {
    * @param heading the robot's heading when the image was taken
    * @param distance the tags' average distance from the camera
    */
-  private VisionResult headingConstrained(
-      Image image, List<TagDetections.Tag> known, Rotation2d heading, double distance) {
+  private ImageVerdict headingConstrained(
+      Image image, List<TagDetections.Sighting> known, Rotation2d heading, double distance) {
     TagDetections seen = image.seen();
     CaptureContext robot = image.robot();
     VisionConfig config = image.config();
@@ -312,7 +475,7 @@ public final class VisionPipeline {
     Rotation3d attitude =
         new Rotation3d(robot.rollRadians(), robot.pitchRadians(), heading.getRadians());
     WeightedFixes fixes = new WeightedFixes();
-    for (TagDetections.Tag tag : known) {
+    for (TagDetections.Sighting tag : known) {
       Pose3d fieldToTag = field.tag(tag.id()).orElseThrow();
       Transform3d cameraToTag = agreeingWithTheGyro(tag, fieldToTag, robotToCamera, heading);
       TagSolver.PositionFix fix =
@@ -324,7 +487,7 @@ public final class VisionPipeline {
     boolean heightsFit = Math.abs(worstHeight) <= config.maxHeightErrorMeters();
     if (!heightsFit) {
       return rejected(
-          seen,
+          image,
           Verdict.TAG_HEIGHT,
           worstHeight,
           config.maxHeightErrorMeters(),
@@ -334,7 +497,7 @@ public final class VisionPipeline {
     Translation2d position = fixes.position();
     if (!Double.isFinite(position.getX()) || !Double.isFinite(position.getY())) {
       return rejected(
-          seen, Verdict.SOLVE_NOT_A_NUMBER, Double.NaN, Double.NaN, distance, worstHeight);
+          image, Verdict.SOLVE_NOT_A_NUMBER, Double.NaN, Double.NaN, distance, worstHeight);
     }
     double spread =
         widened(
@@ -371,7 +534,7 @@ public final class VisionPipeline {
             ids(known),
             fixes.weights,
             VisionMeasurement.Solver.HEADING_CONSTRAINED);
-    return new VisionResult(
+    return new ImageVerdict(
         seen,
         measurement,
         null,
@@ -384,7 +547,8 @@ public final class VisionPipeline {
         distance,
         worstHeight,
         Double.NaN,
-        Double.NaN);
+        Double.NaN,
+        image.leftOut());
   }
 
   /**
@@ -407,7 +571,10 @@ public final class VisionPipeline {
    * vision software gives a zero transform for none).
    */
   private static Transform3d agreeingWithTheGyro(
-      TagDetections.Tag tag, Pose3d fieldToTag, Transform3d robotToCamera, Rotation2d heading) {
+      TagDetections.Sighting tag,
+      Pose3d fieldToTag,
+      Transform3d robotToCamera,
+      Rotation2d heading) {
     Transform3d best = tag.bestCameraToTag();
     Transform3d alternate = tag.altCameraToTag();
     boolean hasAlternate = !(alternate.getTranslation().getNorm() < NO_ALTERNATE_BELOW_METERS);
@@ -437,10 +604,10 @@ public final class VisionPipeline {
    * @param used the tags the pose came from
    * @param distance how far those tags are from the camera, on average
    */
-  private VisionResult fullPose(
+  private ImageVerdict fullPose(
       Image image,
       Pose3d pose,
-      List<TagDetections.Tag> used,
+      List<TagDetections.Sighting> used,
       double distance,
       VisionMeasurement.Solver solver) {
     TagDetections seen = image.seen();
@@ -449,13 +616,13 @@ public final class VisionPipeline {
     if (!Double.isFinite(pose.getX())
         || !Double.isFinite(pose.getY())
         || !Double.isFinite(pose.getRotation().getZ())) {
-      return rejected(seen, Verdict.SOLVE_NOT_A_NUMBER, Double.NaN, Double.NaN, distance, height);
+      return rejected(image, Verdict.SOLVE_NOT_A_NUMBER, Double.NaN, Double.NaN, distance, height);
     }
     // Written so a height that isn't a number is refused too.
     boolean onTheFloor = Math.abs(height) <= config.maxHeightErrorMeters();
     if (!onTheFloor) {
       return rejected(
-          seen, Verdict.OFF_THE_FLOOR, height, config.maxHeightErrorMeters(), distance, height);
+          image, Verdict.OFF_THE_FLOOR, height, config.maxHeightErrorMeters(), distance, height);
     }
     double scale = image.scale(used.size(), distance);
     double linear = widened(config.linearStdDevBaseline() * scale, image.mountDoubtMeters());
@@ -470,7 +637,7 @@ public final class VisionPipeline {
             image.camera().name(),
             ids(used),
             solver);
-    return new VisionResult(
+    return new ImageVerdict(
         seen,
         measurement,
         null,
@@ -483,7 +650,8 @@ public final class VisionPipeline {
         distance,
         height,
         Double.NaN,
-        Double.NaN);
+        Double.NaN,
+        image.leftOut());
   }
 
   /**
@@ -503,23 +671,46 @@ public final class VisionPipeline {
     return doubt > 0 ? Math.hypot(spread, doubt) : spread;
   }
 
-  private static List<Integer> ids(List<TagDetections.Tag> tags) {
-    return tags.stream().map(TagDetections.Tag::id).toList();
+  private static List<Integer> ids(List<TagDetections.Sighting> tags) {
+    return tags.stream().map(TagDetections.Sighting::id).toList();
   }
 
   /**
    * An image thrown out, and why: the verdict, with its number and the limit it was held to in its
    * words for the log.
    */
-  private static VisionResult rejected(
-      TagDetections seen,
+  private static ImageVerdict rejected(
+      Image image,
       Verdict why,
       double value,
       double threshold,
       double distance,
       double heightError) {
-    return new VisionResult(
-        seen, null, why, why.describe(value, threshold), distance, heightError, threshold, value);
+    return new ImageVerdict(
+        image.seen(),
+        null,
+        why,
+        why.describe(value, threshold),
+        distance,
+        heightError,
+        threshold,
+        value,
+        image.leftOut());
+  }
+
+  /** An image thrown out, saying why in words of its own: which tags it saw, say. */
+  private static ImageVerdict rejected(
+      Image image, Verdict why, String said, double distance, double heightError) {
+    return new ImageVerdict(
+        image.seen(),
+        null,
+        why,
+        said,
+        distance,
+        heightError,
+        Double.NaN,
+        Double.NaN,
+        image.leftOut());
   }
 
   private static String format(String pattern, Object... values) {

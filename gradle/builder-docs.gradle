@@ -1,0 +1,66 @@
+// The configuration records' builders, as an editor shows them: each setter with what its value
+// means. RecordBuilder writes every setter's Javadoc as "Set a new value for the {@code x} record
+// component in the builder", and has no option to write the record's own @param text there. The
+// docs processor already reads that text as the record compiles, and writes it into the jar for
+// Pitwall (META-INF/pitwall/docs/<record's binary name>.json). So once the compile is done, each
+// generated builder's setter Javadoc is replaced with its component's text from there: a student
+// hovering .driveInverted(...) reads what the record says of driveInverted. The compiled classes
+// don't change, only the generated sources, which the sources jar carries too, so an editor shows
+// the same text for a library that comes from the repository.
+//
+// Apply it after publishing.gradle, which makes the sources jar.
+
+tasks.named("compileJava", JavaCompile) { compile ->
+    def generated = compile.options.generatedSourceOutputDirectory
+    def classes = compile.destinationDirectory
+    doLast {
+        File docs = new File(classes.get().asFile, "META-INF/pitwall/docs")
+        if (!docs.isDirectory()) {
+            return
+        }
+        // A component's text, plain as the docs processor writes it, as Javadoc: its code spans
+        // as code, and nothing in it read as markup or as the comment's end.
+        def asJavadoc = { String plain ->
+            String escaped = plain
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace("@", "&#64;")
+                    .replace("*/", "*&#47;")
+            escaped.replaceAll(/`([^`]+)`/, '<code>$1</code>')
+        }
+        generated.get().asFile.eachFileRecurse(groovy.io.FileType.FILES) { File source ->
+            if (!source.name.endsWith("Builder.java")) {
+                return
+            }
+            String text = source.getText("UTF-8")
+            // The record it builds, as its copying factory names it: builder(Outer.Name from).
+            def builds = text =~ /public static \w+ builder\(([\w.]+) from\)/
+            def inPackage = text =~ /(?m)^package ([\w.]+);/
+            if (!builds.find() || !inPackage.find()) {
+                return
+            }
+            String record = inPackage.group(1) + "." + builds.group(1).replace('.', '$')
+            File doc = new File(docs, record + ".json")
+            if (!doc.isFile()) {
+                return
+            }
+            Map params = new groovy.json.JsonSlurper().parse(doc, "UTF-8").params as Map
+            String documented = text
+            params.each { String name, String meaning ->
+                String javadoc = asJavadoc(meaning)
+                documented = documented
+                        .replace("Set a new value for the {@code ${name}} record component in the builder", javadoc)
+                        .replace("Call builder for optional component {@code ${name}}", javadoc)
+            }
+            if (documented != text) {
+                source.write(documented, "UTF-8")
+            }
+        }
+    }
+}
+
+tasks.named("sourcesJar") {
+    dependsOn "compileJava"
+    from(tasks.named("compileJava", JavaCompile).flatMap { it.options.generatedSourceOutputDirectory })
+}

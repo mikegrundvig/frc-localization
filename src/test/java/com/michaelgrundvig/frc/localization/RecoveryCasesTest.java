@@ -198,12 +198,14 @@ class RecoveryCasesTest {
   @MethodSource("cases")
   void theEstimateGoesWhereIndependentEvidenceSays(Case row) {
     Robot robot = new Robot();
-    // A second's driving, every image agreeing: the placement is backed by a camera.
+    // A second's driving, every image agreeing: the placement is backed by a camera, its heading
+    // by the first image.
     for (int loop = 0; loop < 50; loop++) {
       robot.loop(NORMAL, 0);
       robot.see("front", List.of(26), NONE);
     }
     assertThat(robot.estimator.estimate().health().rejected()).isZero();
+    assertThat(robot.estimator.headingDoubt()).isEqualTo(HeadingDoubt.NONE);
 
     robot.placeWrongBy(row.placedWrong());
     robot.truth = robot.truth.plus(row.shove());
@@ -242,7 +244,7 @@ class RecoveryCasesTest {
     Robot() {
       estimator =
           new PoseEstimator(
-              EstimatorConfig.DEFAULTS,
+              EstimatorConfig.defaults(),
               point -> true,
               List.of(25, 26, 27, 28),
               new PoseReset(0, START, PLACED, "start"));
@@ -282,11 +284,26 @@ class RecoveryCasesTest {
     }
 
     /**
-     * A camera's position, solved with the gyro's heading, good to 2 cm, from tags 3 m ahead: where
-     * the robot is, off by a misread.
+     * A camera's image of tags 3 m ahead, solved as the vision pipeline solves it: where the robot
+     * is, off by a misread. While the heading is a person's word no camera has backed (a
+     * placement's), the image is solved from its tags alone, a pose with a heading of its own good
+     * to 3°; otherwise with the gyro's heading, a position good to 2 cm.
      */
     void see(String camera, List<Integer> tags, Translation2d misread) {
       Pose2d pose = new Pose2d(truth.plus(misread), Rotation2d.ZERO);
+      if (estimator.headingInDoubt()) {
+        estimator.addVision(
+            new VisionMeasurement(
+                time,
+                pose,
+                PoseCovariance.fromStdDevs(0.04, 0.04, Math.toRadians(3)),
+                VisionMeasurement.Lever.NONE,
+                camera,
+                tags,
+                VisionMeasurement.Solver.SINGLE_TAG));
+        estimator.update();
+        return;
+      }
       estimator.addVision(
           new VisionMeasurement(
               time,

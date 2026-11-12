@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import java.util.function.Consumer;
@@ -140,7 +141,7 @@ class MountTurnTest {
   void eachCamerasTurnIsLearnedOrCarriedAndNothingElseIsTakenForOne(Scenario scenario) {
     MountWorld world =
         new MountWorld(
-            EstimatorConfig.DEFAULTS, MEASURED, new Pose2d(6, 3, new Rotation2d(0.2)), 0.1, 7);
+            EstimatorConfig.defaults(), MEASURED, new Pose2d(6, 3, new Rotation2d(0.2)), 0.1, 7);
     scenario.run().accept(world);
 
     PoseEstimator estimator = world.estimator;
@@ -158,7 +159,7 @@ class MountTurnTest {
       double stdDev = estimator.cameraTurnStdDevDegrees(name);
       assertThat(learned)
           .as("%s's turn from the cameras' average, as learned (±%.2f°)", name, stdDev)
-          .isCloseTo(real, org.assertj.core.api.Assertions.within(3 * stdDev));
+          .isCloseTo(real, within(3 * stdDev));
       switch (scenario.promise()) {
         case THE_FIRST_CAMERAS_TURN_IS_LEARNED -> {
           if (camera == 0) {

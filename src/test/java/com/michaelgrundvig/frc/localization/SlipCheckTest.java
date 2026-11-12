@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
+import com.michaelgrundvig.frc.world.robot.RobotMath;
 import java.util.List;
 import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
@@ -20,11 +21,11 @@ import org.wpilib.math.kinematics.ChassisVelocities;
 class SlipCheckTest {
   private static final double LOOP = 0.02;
   private static final double REACH = 0.4;
-  private static final SlipCheck.Settings SETTINGS = SlipCheck.Settings.DEFAULTS;
+  private static final SlipCheck.Settings SETTINGS = SlipCheck.Settings.defaults();
   private static final double TOLERANCE = SETTINGS.speedToleranceMetersPerSecond();
 
   /** The tread's grip, its friction of 1.2 times g: what the floor can explain. */
-  private static final double GRIP = 1.2 * ImuReadings.STANDARD_GRAVITY;
+  private static final double GRIP = 1.2 * RobotMath.GRAVITY;
 
   /** Loops enough to stand still for the accelerometer's bias to be learned. */
   private static final int STEADY = (int) Math.ceil(SETTINGS.steadySeconds() / LOOP) + 1;
@@ -333,7 +334,7 @@ class SlipCheckTest {
    */
   @Test
   void aSteadyReadingStandingIsTheBiasWhateverItsSize() {
-    for (double[] leak : new double[][] {{1.7, 0}, {0, ImuReadings.STANDARD_GRAVITY}}) {
+    for (double[] leak : new double[][] {{1.7, 0}, {0, RobotMath.GRAVITY}}) {
       Robot robot = new Robot(Translation2d.ZERO, false);
       robot.bias = leak[0];
       robot.biasLeft = leak[1];
@@ -599,7 +600,7 @@ class SlipCheckTest {
    */
   @Test
   void aGripPastTheJoltLeavesNoCollisionTheFloorCouldExplain() {
-    double grip = 1.7 * ImuReadings.STANDARD_GRAVITY;
+    double grip = 1.7 * RobotMath.GRAVITY;
     Robot nudged = new Robot(Translation2d.ZERO, true, grip).loops(10, 0, 0, 0, 0);
     Robot hit = new Robot(Translation2d.ZERO, true, grip).loops(10, 0, 0, 0, 0);
     Robot stopping = new Robot(Translation2d.ZERO, false, grip);
@@ -618,6 +619,9 @@ class SlipCheckTest {
     assertThat(hit.check.collisionShare()).isOne();
     assertThat(stopping.check.collisionShare()).isZero();
     assertThat(slammed.check.collisionShare()).isOne();
+    assertThat(hit.check.unexplainedMetersPerSecSq()).isPositive();
+    hit.check.startOver(Double.NaN, Double.NaN);
+    assertThat(hit.check.unexplainedMetersPerSecSq()).as("forgotten, starting over").isZero();
   }
 
   /** Without a checked accelerometer, a jolt's size alone decides. */

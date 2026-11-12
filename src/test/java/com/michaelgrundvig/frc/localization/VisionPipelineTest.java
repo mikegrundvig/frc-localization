@@ -11,6 +11,7 @@ import static org.wpilib.units.Units.Milliseconds;
 
 import com.michaelgrundvig.frc.world.field.FieldModel;
 import com.michaelgrundvig.frc.world.field.Symmetry;
+import com.michaelgrundvig.frc.world.game.Rebuilt;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,7 +34,7 @@ import org.wpilib.math.geometry.Translation3d;
 class VisionPipelineTest {
   private static final FieldModel FIELD =
       new FieldModel(
-          Fields.FRC_2026_REBUILT_WELDED.loadField(),
+          Rebuilt.GAME.layout(Fields.FRC_2026_REBUILT_WELDED.loadField()),
           Symmetry.ROTATED,
           List.of(),
           List.of(),
@@ -47,43 +48,34 @@ class VisionPipelineTest {
 
   /** A forward camera at the front of the robot, tilted up 15 degrees. */
   private static CameraConfig camera(double up, double noiseScale) {
-    return CameraConfig.builder()
-        .name("front")
-        .forward(Inches.of(12))
-        .left(Inches.of(0))
-        .up(Inches.of(up / 0.0254))
-        .roll(Degrees.of(0))
-        .tiltUp(Degrees.of(15))
-        .yaw(Degrees.of(0))
-        .sensor(
-            CameraConfig.Sensor.builder()
-                .widthPixels(1280)
-                .heightPixels(800)
-                .fieldOfView(Degrees.of(80))
-                .fieldOfViewAcross(CameraConfig.Across.DIAGONAL)
-                .frameRate(Hertz.of(30))
+    return CameraConfig.of(
+            "front",
+            CameraConfig.ImageSensor.of(1280, 800, Hertz.of(30))
+                .fieldOfView(Degrees.of(80), CameraConfig.Across.DIAGONAL)
                 .latency(Milliseconds.of(30))
-                .sightRange(Meters.of(7))
-                .build())
+                .sightRange(Meters.of(7)))
+        .at(Inches.of(12), Inches.of(0), Inches.of(up / 0.0254))
+        .facing(Degrees.of(15), Degrees.of(0))
+        .roll(Degrees.of(0))
         .noiseScale(noiseScale)
-        .build();
+        .measured();
   }
 
   /** The camera's exact view of some tags, with the robot where it is. */
   private static TagDetections seeing(
       Pose2d robot, CameraConfig mount, boolean multiTag, int... ids) {
     Pose3d cameraPose = new Pose3d(robot).transformBy(mount.robotToCamera());
-    List<TagDetections.Tag> tags = new ArrayList<>();
+    List<TagDetections.Sighting> tags = new ArrayList<>();
     for (int id : ids) {
       Transform3d view = new Transform3d(cameraPose, FIELD.tag(id).orElseThrow());
-      tags.add(new TagDetections.Tag(id, corners(), view, flipped(view), 0.05));
+      tags.add(new TagDetections.Sighting(id, corners(), view, flipped(view), 0.05));
     }
     TagDetections.MultiTag solved =
         multiTag
             ? new TagDetections.MultiTag(
                 new Transform3d(new Pose3d(), cameraPose),
                 0.3,
-                tags.stream().map(TagDetections.Tag::id).toList())
+                tags.stream().map(TagDetections.Sighting::id).toList())
             : null;
     return new TagDetections(1_000_000_000L, mount.name(), tags, solved);
   }
@@ -112,17 +104,18 @@ class VisionPipelineTest {
   }
 
   /** The result's measurement, which the test expects there to be. */
-  private static VisionMeasurement measured(VisionResult result) {
-    return Objects.requireNonNull(result.measurement(), result.outcome());
+  private static VisionMeasurement measured(ImageVerdict result) {
+    return Objects.requireNonNull(result.measurement(), result.described());
   }
 
-  private VisionResult process(TagDetections seen, CaptureContext robot) {
-    return pipeline.process(seen, camera, robot, VisionConfig.DEFAULTS, VisionPipeline.Trust.FULL);
+  private ImageVerdict process(TagDetections seen, CaptureContext robot) {
+    return pipeline.process(
+        seen, camera, robot, VisionConfig.defaults(), VisionPipeline.Terms.AS_CONFIGURED);
   }
 
   @Test
   void withTheGyrosHeadingEachTagFixesThePosition() {
-    VisionResult result =
+    ImageVerdict result =
         process(seeing(ROBOT, camera, false, 25, 26), steady(ROBOT.getRotation()));
 
     VisionMeasurement measured = measured(result);
@@ -131,7 +124,7 @@ class VisionPipelineTest {
         .isLessThan(1e-9);
     assertThat(measured.covariance().hasHeading()).as("the gyro keeps heading").isFalse();
     assertThat(result.heightErrorMeters()).isCloseTo(0.0, within(1e-9));
-    assertThat(result.outcome()).startsWith("heading-constrained: 2 tags at ");
+    assertThat(result.described()).startsWith("heading-constrained: 2 tags at ");
   }
 
   /**
@@ -209,17 +202,17 @@ class VisionPipelineTest {
   @Test
   void theGyroSettlesWhichOfATagsTwoPosesIsRight() {
     TagDetections seen = seeing(ROBOT, camera, false, 26);
-    TagDetections.Tag tag = seen.tags().get(0);
+    TagDetections.Sighting tag = seen.tags().get(0);
     TagDetections swapped =
         new TagDetections(
             seen.timestampNanos(),
             seen.camera(),
             List.of(
-                new TagDetections.Tag(
+                new TagDetections.Sighting(
                     26, corners(), tag.altCameraToTag(), tag.bestCameraToTag(), 0.4)),
             null);
 
-    VisionResult result = process(swapped, steady(ROBOT.getRotation()));
+    ImageVerdict result = process(swapped, steady(ROBOT.getRotation()));
 
     assertThat(measured(result).pose().getTranslation().getDistance(ROBOT.getTranslation()))
         .isLessThan(1e-9);
@@ -230,10 +223,10 @@ class VisionPipelineTest {
   void aCameraMountedOtherThanItsConfigurationSaysFailsTheHeightCheck() {
     TagDetections seen = seeing(ROBOT, camera(0.6, 1.0), false, 25, 26); // really 30 cm higher
 
-    VisionResult result = process(seen, steady(ROBOT.getRotation()));
+    ImageVerdict result = process(seen, steady(ROBOT.getRotation()));
 
     assertThat(result.measurement()).isNull();
-    assertThat(result.outcome()).startsWith("a tag's height is off by");
+    assertThat(result.described()).startsWith("a tag's height is off by");
     assertThat(result.heightErrorMeters()).isCloseTo(0.3, within(0.05));
   }
 
@@ -242,8 +235,8 @@ class VisionPipelineTest {
     Pose2d truth = ROBOT;
     Rotation2d driftedGyro = truth.getRotation().plus(Rotation2d.fromDegrees(1.5));
 
-    VisionResult steady = process(seeing(truth, camera, true, 25, 26), steady(driftedGyro));
-    VisionResult turning =
+    ImageVerdict steady = process(seeing(truth, camera, true, 25, 26), steady(driftedGyro));
+    ImageVerdict turning =
         process(
             seeing(truth, camera, true, 25, 26),
             new CaptureContext(driftedGyro, Math.toRadians(1), 0, 0, 0, 2.0));
@@ -260,8 +253,8 @@ class VisionPipelineTest {
   void withoutATrustedHeadingItSolvesTheWholePose() {
     CaptureContext lost = new CaptureContext(null, Math.PI, 0, 0, 0, 0);
 
-    VisionResult multi = process(seeing(ROBOT, camera, true, 25, 26), lost);
-    VisionResult single = process(seeing(ROBOT, camera, false, 26), lost);
+    ImageVerdict multi = process(seeing(ROBOT, camera, true, 25, 26), lost);
+    ImageVerdict single = process(seeing(ROBOT, camera, false, 26), lost);
 
     assertThat(measured(multi).solver()).isEqualTo(VisionMeasurement.Solver.MULTI_TAG);
     assertThat(measured(multi).pose().getTranslation().getDistance(ROBOT.getTranslation()))
@@ -273,20 +266,20 @@ class VisionPipelineTest {
   @Test
   void anAmbiguousSingleTagIsThrownOutWhenNothingSettlesIt() {
     TagDetections seen = seeing(ROBOT, camera, false, 26);
-    TagDetections.Tag tag = seen.tags().get(0);
+    TagDetections.Sighting tag = seen.tags().get(0);
     TagDetections ambiguous =
         new TagDetections(
             seen.timestampNanos(),
             seen.camera(),
             List.of(
-                new TagDetections.Tag(
+                new TagDetections.Sighting(
                     26, corners(), tag.bestCameraToTag(), tag.altCameraToTag(), 0.35)),
             null);
 
-    VisionResult result = process(ambiguous, new CaptureContext(null, Math.PI, 0, 0, 0, 0));
+    ImageVerdict result = process(ambiguous, new CaptureContext(null, Math.PI, 0, 0, 0, 0));
 
     assertThat(result.measurement()).isNull();
-    assertThat(result.outcome()).isEqualTo("ambiguous single tag: 0.35 > 0.20");
+    assertThat(result.described()).isEqualTo("ambiguous single tag: 0.35 > 0.20");
   }
 
   @Test
@@ -294,28 +287,29 @@ class VisionPipelineTest {
     TagDetections seen = seeing(ROBOT, camera, false, 25, 26);
     Pose2d farAway = new Pose2d(0.5, 4.1, Rotation2d.ZERO); // 3.5 m from the tags
 
-    VisionResult spinning =
+    ImageVerdict spinning =
         process(seen, new CaptureContext(ROBOT.getRotation(), 0.01, 0, 0, 0, 6.0));
-    VisionResult tooFar =
+    ImageVerdict tooFar =
         pipeline.process(
             seeing(farAway, camera, false, 25, 26),
             camera,
             steady(farAway.getRotation()),
-            VisionConfigBuilder.builder(VisionConfig.DEFAULTS).maxDistanceMeters(3.0).build(),
-            VisionPipeline.Trust.FULL);
-    VisionResult unknownTag =
+            VisionConfigBuilder.builder(VisionConfig.defaults()).maxDistanceMeters(3.0).build(),
+            VisionPipeline.Terms.AS_CONFIGURED);
+    ImageVerdict unknownTag =
         process(
             new TagDetections(
                 1,
                 "front",
                 List.of(
-                    new TagDetections.Tag(99, corners(), Transform3d.ZERO, Transform3d.ZERO, 0.1)),
+                    new TagDetections.Sighting(
+                        99, corners(), Transform3d.ZERO, Transform3d.ZERO, 0.1)),
                 null),
             steady(ROBOT.getRotation()));
 
-    assertThat(spinning.outcome()).isEqualTo("turning too fast: 6.0 rad/s");
-    assertThat(tooFar.outcome()).startsWith("too far: 3.");
-    assertThat(unknownTag.outcome()).isEqualTo("no tags from this field's layout");
+    assertThat(spinning.described()).isEqualTo("turning too fast: 6.0 rad/s > 5.0 rad/s");
+    assertThat(tooFar.described()).matches("too far: 3\\.\\d m > 3\\.0 m");
+    assertThat(unknownTag.described()).isEqualTo("tag 99 isn't in this field's layout");
     assertThat(List.of(spinning, tooFar, unknownTag))
         .allSatisfy(result -> assertThat(result.measurement()).isNull());
   }
@@ -324,8 +318,8 @@ class VisionPipelineTest {
   void aFullSolveThatPutsTheRobotOffTheFloorIsThrownOut() {
     Pose3d lifted = new Pose3d(ROBOT).transformBy(new Transform3d(0, 0, 0.4, Rotation3d.ZERO));
     Pose3d cameraPose = lifted.transformBy(camera.robotToCamera());
-    TagDetections.Tag tag =
-        new TagDetections.Tag(
+    TagDetections.Sighting tag =
+        new TagDetections.Sighting(
             26,
             corners(),
             new Transform3d(cameraPose, FIELD.tag(26).orElseThrow()),
@@ -333,9 +327,9 @@ class VisionPipelineTest {
             0.05);
     TagDetections seen = new TagDetections(1, "front", List.of(tag), null);
 
-    VisionResult result = process(seen, new CaptureContext(null, Math.PI, 0, 0, 0, 0));
+    ImageVerdict result = process(seen, new CaptureContext(null, Math.PI, 0, 0, 0, 0));
 
-    assertThat(result.outcome()).isEqualTo("the solve puts the robot 0.40 m off the floor");
+    assertThat(result.described()).isEqualTo("the solve puts the robot 0.40 m off the floor");
   }
 
   @Test
@@ -375,13 +369,17 @@ class VisionPipelineTest {
                 seen,
                 camera,
                 steady(ROBOT.getRotation()),
-                VisionConfig.DEFAULTS,
-                new VisionPipeline.Trust(doubt, null)));
+                VisionConfig.defaults(),
+                new VisionPipeline.Terms(doubt, null)));
     VisionMeasurement calibrated = measured(process(seen, steady(ROBOT.getRotation())));
     VisionMeasurement full =
         measured(
             pipeline.process(
-                seen, camera, lost, VisionConfig.DEFAULTS, new VisionPipeline.Trust(doubt, null)));
+                seen,
+                camera,
+                lost,
+                VisionConfig.defaults(),
+                new VisionPipeline.Terms(doubt, null)));
     VisionMeasurement fullCalibrated = measured(process(seen, lost));
     double distance = process(seen, lost).distanceMeters();
 
@@ -410,20 +408,20 @@ class VisionPipelineTest {
     TagDetections seen = seeing(ROBOT, camera, true, 25, 26);
     CaptureContext steady = steady(ROBOT.getRotation());
 
-    VisionResult onlyOne =
+    ImageVerdict onlyOne =
         pipeline.process(
             seen,
             camera,
             steady,
-            VisionConfig.DEFAULTS,
-            new VisionPipeline.Trust(0, TagAllowlist.of("Hub", List.of(26, 27))));
-    VisionResult none =
+            VisionConfig.defaults(),
+            new VisionPipeline.Terms(0, TagAllowlist.of("Hub", List.of(26, 27))));
+    ImageVerdict none =
         pipeline.process(
             seen,
             camera,
             steady,
-            VisionConfig.DEFAULTS,
-            new VisionPipeline.Trust(0, TagAllowlist.of("Hub", List.of(10))));
+            VisionConfig.defaults(),
+            new VisionPipeline.Terms(0, TagAllowlist.of("Hub", List.of(10))));
 
     assertThat(measured(onlyOne).tagIds()).containsExactly(26);
     assertThat(measured(onlyOne).pose().getTranslation().getDistance(ROBOT.getTranslation()))
@@ -432,7 +430,7 @@ class VisionPipelineTest {
         .as("the multi-tag solution used tag 25 too")
         .isFalse();
     assertThat(none.measurement()).isNull();
-    assertThat(none.outcome()).isEqualTo("no tags this task trusts (Hub: 10)");
+    assertThat(none.described()).isEqualTo("no tags this task trusts (Hub: 10)");
   }
 
   /**
@@ -441,19 +439,19 @@ class VisionPipelineTest {
   @Test
   void aMultiTagSolutionOfTrustedTagsIsKept() {
     TagDetections seen = seeing(ROBOT, camera, true, 25, 26);
-    VisionPipeline.Trust hub = new VisionPipeline.Trust(0, TagAllowlist.of("Hub", List.of(25, 26)));
+    VisionPipeline.Terms hub = new VisionPipeline.Terms(0, TagAllowlist.of("Hub", List.of(25, 26)));
 
     VisionMeasurement steady =
         measured(
             pipeline.process(
-                seen, camera, steady(ROBOT.getRotation()), VisionConfig.DEFAULTS, hub));
+                seen, camera, steady(ROBOT.getRotation()), VisionConfig.defaults(), hub));
     VisionMeasurement lost =
         measured(
             pipeline.process(
                 seen,
                 camera,
                 new CaptureContext(null, Math.PI, 0, 0, 0, 0),
-                VisionConfig.DEFAULTS,
+                VisionConfig.defaults(),
                 hub));
 
     assertThat(steady.covariance().hasHeading()).isTrue();
@@ -473,18 +471,18 @@ class VisionPipelineTest {
     Rotation3d noTurn = new Rotation3d(Double.NaN, 0, 0);
     CaptureContext lost = new CaptureContext(null, Math.PI, 0, 0, 0, 0);
 
-    VisionResult tagNowhere =
+    ImageVerdict tagNowhere =
         process(
             withTag(seen, new Transform3d(new Translation3d(Double.NaN, 0, 0), tag.getRotation())),
             steady(ROBOT.getRotation()));
-    VisionResult solvedNowhere =
+    ImageVerdict solvedNowhere =
         process(
             withMultiTag(
                 seen, new Transform3d(new Translation3d(Double.NaN, 0, 0), solved.getRotation())),
             lost);
-    VisionResult solvedUnturned =
+    ImageVerdict solvedUnturned =
         process(withMultiTag(seen, new Transform3d(solved.getTranslation(), noTurn)), lost);
-    VisionResult singleUnturned =
+    ImageVerdict singleUnturned =
         process(
             withTag(
                 seeing(ROBOT, camera, false, 26), new Transform3d(tag.getTranslation(), noTurn)),
@@ -494,7 +492,241 @@ class VisionPipelineTest {
     assertThat(solvedNowhere.refused()).isEqualTo(Verdict.SOLVE_NOT_A_NUMBER);
     assertThat(solvedUnturned.refused()).isEqualTo(Verdict.SOLVE_NOT_A_NUMBER);
     assertThat(singleUnturned.refused()).isEqualTo(Verdict.SOLVE_NOT_A_NUMBER);
-    assertThat(solvedUnturned.outcome()).isEqualTo("the solve isn't a number");
+    assertThat(solvedUnturned.described()).isEqualTo("the solve isn't a number");
+  }
+
+  /** An image the pipeline should refuse, as the robot was when it was taken, and why. */
+  private record Refusal(String name, TagDetections seen, CaptureContext robot, String outcome) {}
+
+  /** The single tag 26 seen this far from the camera, along the line it really lies on. */
+  private TagDetections tag26At(double meters) {
+    TagDetections seen = seeing(ROBOT, camera, false, 26);
+    Transform3d view = seen.tags().get(0).bestCameraToTag();
+    Translation3d along = view.getTranslation().times(meters / view.getTranslation().getNorm());
+    return withTag(seen, new Transform3d(along, view.getRotation()));
+  }
+
+  /**
+   * Tags nearer than any real view (a coprocessor's zero for no pose, say) would claim a
+   * near-perfect fix, and a speed or turn rate that isn't a number an uncertainty that isn't one:
+   * each image is refused, saying why, before it becomes a measurement.
+   */
+  @Test
+  void anImageOfTagsTooCloseOrOfAMotionThatIsntANumberIsRefusedSayingSo() {
+    TagDetections hub = seeing(ROBOT, camera, false, 25, 26);
+    Rotation2d heading = ROBOT.getRotation();
+    String motion = "the robot's speed or turn rate as the image was taken isn't a number";
+    List<Refusal> rows =
+        List.of(
+            new Refusal(
+                "a tag at the camera", tag26At(0), steady(heading), "too close: 0.00 m < 0.10 m"),
+            new Refusal(
+                "a tag 5 cm away", tag26At(0.05), steady(heading), "too close: 0.05 m < 0.10 m"),
+            new Refusal(
+                "a tag 5 cm away, with no heading to solve with",
+                tag26At(0.05),
+                steady(null),
+                "too close: 0.05 m < 0.10 m"),
+            new Refusal(
+                "a speed that isn't a number",
+                hub,
+                new CaptureContext(heading, 0.01, 0, 0, Double.NaN, 0),
+                motion),
+            new Refusal(
+                "an infinite speed",
+                hub,
+                new CaptureContext(heading, 0.01, 0, 0, Double.POSITIVE_INFINITY, 0),
+                motion),
+            new Refusal(
+                "a turn rate that isn't a number",
+                hub,
+                new CaptureContext(heading, 0.01, 0, 0, 0, Double.NaN),
+                motion));
+    for (Refusal row : rows) {
+      ImageVerdict result = process(row.seen(), row.robot());
+
+      assertThat(result.measurement()).as(row.name()).isNull();
+      assertThat(result.described()).as(row.name()).isEqualTo(row.outcome());
+    }
+  }
+
+  /**
+   * What an image without a tag to solve says, each cause in its own words: nothing in view, tags
+   * the field's layout doesn't have (named), and tags Visor sent without poses, which a camera with
+   * no lens calibration always does (named too). Each tag left out says why on its own.
+   */
+  private record NoTagToSolve(
+      String name, TagDetections seen, CameraConfig camera, Verdict verdict, String outcome) {}
+
+  @Test
+  void anImageWithoutATagToSolveSaysWhichOfItsCausesItWas() {
+    CameraConfig noLens = camera.withSoftware(CameraConfig.Software.VISOR);
+    CameraConfig calibrated = camera.withSoftware(CameraConfig.Software.visor().lens(lens()));
+    TagDetections unsolved = new TagDetections(1, "front", List.of(), null, List.of(25, 26));
+    List<NoTagToSolve> rows =
+        List.of(
+            new NoTagToSolve(
+                "nothing in view",
+                new TagDetections(1, "front", List.of(), null),
+                camera,
+                Verdict.NO_TAGS,
+                "saw no tags"),
+            new NoTagToSolve(
+                "two tags off the layout",
+                new TagDetections(
+                    1,
+                    "front",
+                    List.of(
+                        new TagDetections.Sighting(
+                            98, corners(), Transform3d.ZERO, Transform3d.ZERO, 0.1),
+                        new TagDetections.Sighting(
+                            99, corners(), Transform3d.ZERO, Transform3d.ZERO, 0.1)),
+                    null),
+                camera,
+                Verdict.UNKNOWN_TAGS,
+                "tags 98, 99 aren't in this field's layout"),
+            new NoTagToSolve(
+                "tags from Visor with no lens calibration",
+                unsolved,
+                noLens,
+                Verdict.NO_LENS,
+                "saw tags 25, 26 and has no lens calibration to solve them: Visor sends corners"
+                    + " and no poses without one (docs/visor.md)"),
+            new NoTagToSolve(
+                "tags a calibrated camera saw edge-on",
+                unsolved,
+                calibrated,
+                Verdict.UNSOLVED_TAGS,
+                "saw tags 25, 26 too edge-on or too small to solve"));
+    for (NoTagToSolve row : rows) {
+      ImageVerdict result =
+          pipeline.process(
+              row.seen(),
+              row.camera(),
+              steady(ROBOT.getRotation()),
+              VisionConfig.defaults(),
+              VisionPipeline.Terms.AS_CONFIGURED);
+
+      assertThat(result.refused()).as(row.name()).isEqualTo(row.verdict());
+      assertThat(result.described()).as(row.name()).isEqualTo(row.outcome());
+      assertThat(result.leftOutTags())
+          .as(row.name() + ": each tag says why")
+          .allSatisfy(tag -> assertThat(tag.verdict()).isEqualTo(row.verdict()));
+    }
+  }
+
+  /** A lens at the test camera's frame size, as calibrate.py prints one. */
+  private static CameraConfig.Software.Lens lens() {
+    return CameraConfig.Software.Lens.builder()
+        .width(1280)
+        .height(800)
+        .fx(905.2)
+        .fy(905.6)
+        .cx(641.3)
+        .cy(398.8)
+        .distortion(List.of(-0.31, 0.12, 0.0004, -0.0002, -0.02))
+        .build();
+  }
+
+  /**
+   * A tag out of reach costs only itself: the image is solved from the others, and the tag left out
+   * says its distance and the limit. A tag at the camera (a coprocessor's zero for no pose) beside
+   * real ones can't make the image claim a near-perfect fix, solved by the gyro's heading or, with
+   * none, as the clearest single tag.
+   */
+  private record OutOfReach(
+      String name,
+      TagDetections seen,
+      @Nullable Rotation2d heading,
+      VisionConfig config,
+      String leftOut) {}
+
+  @Test
+  void aTagOutOfReachIsLeftOutAndTheImageSolvedFromTheRest() {
+    VisionConfig nearOnly =
+        VisionConfigBuilder.builder(VisionConfig.defaults()).maxDistanceMeters(1.0).build();
+    TagDetections hub = seeing(ROBOT, camera, false, 25, 26);
+    double tag26 = hub.tags().get(1).bestCameraToTag().getTranslation().getNorm();
+    // The farther of the two is past a limit set between them.
+    double tag25 = hub.tags().get(0).bestCameraToTag().getTranslation().getNorm();
+    VisionConfig between =
+        VisionConfigBuilder.builder(VisionConfig.defaults())
+            .maxDistanceMeters((tag25 + tag26) / 2)
+            .build();
+    int far = tag25 > tag26 ? 25 : 26;
+    TagDetections zeroBesideTheHub = withTagAt(hub, 0, 0.0, 0.0);
+    List<OutOfReach> rows =
+        List.of(
+            new OutOfReach(
+                "the farther hub tag past the limit",
+                hub,
+                ROBOT.getRotation(),
+                between,
+                far + " too far"),
+            new OutOfReach(
+                "a tag at the camera, solved by the gyro's heading",
+                zeroBesideTheHub,
+                ROBOT.getRotation(),
+                VisionConfig.defaults(),
+                "25 too close: 0.00 m < 0.10 m"),
+            new OutOfReach(
+                "a tag at the camera and clearest, solved as a single tag",
+                zeroBesideTheHub,
+                null,
+                VisionConfig.defaults(),
+                "25 too close: 0.00 m < 0.10 m"));
+    for (OutOfReach row : rows) {
+      ImageVerdict result =
+          pipeline.process(
+              row.seen(),
+              camera,
+              new CaptureContext(row.heading(), Math.toRadians(1), 0, 0, 0, 0),
+              row.config(),
+              VisionPipeline.Terms.AS_CONFIGURED);
+
+      VisionMeasurement measured = measured(result);
+      assertThat(result.leftOutTags())
+          .as(row.name())
+          .extracting(tag -> tag.tag() + " " + tag.described())
+          .singleElement()
+          .asString()
+          .startsWith(row.leftOut());
+      assertThat(measured.tagIds())
+          .as(row.name())
+          .doesNotContain(result.leftOutTags().get(0).tag());
+      assertThat(measured.covariance().xStdDev())
+          .as(row.name() + ": as sure as the tags in reach make it, no surer")
+          .isGreaterThan(0.005);
+    }
+    assertThat(
+            pipeline.process(
+                hub, camera, steady(null), nearOnly, VisionPipeline.Terms.AS_CONFIGURED))
+        .as("every tag past the limit: too far, by the nearest")
+        .extracting(ImageVerdict::described)
+        .asString()
+        .matches("too far: \\d\\.\\d m > 1\\.0 m");
+  }
+
+  /** The image, one of its tags seen this far from the camera along its line, and this clear. */
+  private static TagDetections withTagAt(
+      TagDetections seen, int which, double meters, double ambiguity) {
+    List<TagDetections.Sighting> tags = new ArrayList<>(seen.tags());
+    TagDetections.Sighting tag = tags.get(which);
+    Transform3d view = tag.bestCameraToTag();
+    Translation3d along = view.getTranslation().times(meters / view.getTranslation().getNorm());
+    Transform3d moved = new Transform3d(along, view.getRotation());
+    tags.set(which, new TagDetections.Sighting(tag.id(), tag.corners(), moved, moved, ambiguity));
+    return new TagDetections(seen.timestampNanos(), seen.camera(), tags, seen.multiTag());
+  }
+
+  @Test
+  void theNearestTagsAllowedAreNearerThanTheFarthest() {
+    assertThatThrownBy(
+            () -> VisionConfigBuilder.builder(VisionConfig.defaults()).minDistanceMeters(6).build())
+        .hasMessage("VisionConfig.minDistanceMeters: 6 must be below 6");
+    assertThatThrownBy(
+            () -> VisionConfigBuilder.builder(VisionConfig.defaults()).minDistanceMeters(0).build())
+        .hasMessage("VisionConfig.minDistanceMeters: 0 must be positive");
   }
 
   /**
@@ -522,9 +754,10 @@ class VisionPipelineTest {
 
   /** The image, its first tag seen this way instead. */
   private static TagDetections withTag(TagDetections seen, Transform3d view) {
-    List<TagDetections.Tag> tags = new ArrayList<>(seen.tags());
-    TagDetections.Tag first = tags.get(0);
-    tags.set(0, new TagDetections.Tag(first.id(), first.corners(), view, view, first.ambiguity()));
+    List<TagDetections.Sighting> tags = new ArrayList<>(seen.tags());
+    TagDetections.Sighting first = tags.get(0);
+    tags.set(
+        0, new TagDetections.Sighting(first.id(), first.corners(), view, view, first.ambiguity()));
     return new TagDetections(seen.timestampNanos(), seen.camera(), tags, seen.multiTag());
   }
 
@@ -541,15 +774,16 @@ class VisionPipelineTest {
 
   @Test
   void aMountsDoubtIsZeroOrMore() {
-    assertThatThrownBy(() -> new VisionPipeline.Trust(-0.1, null))
+    assertThatThrownBy(() -> new VisionPipeline.Terms(-0.1, null))
         .hasMessage("a mount's doubt is zero or more: -0.1");
-    assertThatThrownBy(() -> new VisionPipeline.Trust(Double.NaN, null))
-        .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new VisionPipeline.Terms(Double.NaN, null))
+        .hasMessage("a mount's doubt is zero or more: NaN");
   }
 
   private double spread(TagDetections seen, CaptureContext robot, CameraConfig mount) {
     return measured(
-            pipeline.process(seen, mount, robot, VisionConfig.DEFAULTS, VisionPipeline.Trust.FULL))
+            pipeline.process(
+                seen, mount, robot, VisionConfig.defaults(), VisionPipeline.Terms.AS_CONFIGURED))
         .covariance()
         .xStdDev();
   }

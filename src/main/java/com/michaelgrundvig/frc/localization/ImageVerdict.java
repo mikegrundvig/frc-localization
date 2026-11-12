@@ -1,5 +1,6 @@
 package com.michaelgrundvig.frc.localization;
 
+import java.util.List;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -8,7 +9,7 @@ import org.jspecify.annotations.Nullable;
  * @param detections the image's tags
  * @param measurement the measurement, or null if the image was thrown out
  * @param refused why the image was thrown out, or null if it became a measurement
- * @param outcome in words, for the log: "heading-constrained: 2 tags at 3.1 m", or the refusal's
+ * @param described in words, for the log: "heading-constrained: 2 tags at 3.1 m", or the refusal's
  *     words with its numbers ("too far: 5.1 m")
  * @param distanceMeters the tags' average distance from the camera; NaN if not measured
  * @param heightErrorMeters how far the solve missed the tags' known heights, or the floor; NaN if
@@ -17,19 +18,24 @@ import org.jspecify.annotations.Nullable;
  *     for an image solved, or a refusal without one
  * @param value a refusal's number: the tags' distance, the robot's turning, a tag's ambiguity or
  *     height; NaN for an image solved, or a refusal without one
+ * @param leftOutTags the image's tags that were left out of it, each with why: a tag too far or too
+ *     close, one the field's layout doesn't have, one that wasn't solved. Whatever became of the
+ *     image, these tags had no part in it
  */
-public record VisionResult(
+public record ImageVerdict(
     TagDetections detections,
     @Nullable VisionMeasurement measurement,
     @Nullable Verdict refused,
-    String outcome,
+    String described,
     double distanceMeters,
     double heightErrorMeters,
     double threshold,
-    double value) {
-  public VisionResult {
+    double value,
+    List<TagVerdict> leftOutTags) {
+  public ImageVerdict {
     if ((measurement == null) == (refused == null)) {
       throw new IllegalArgumentException("an image becomes a measurement or is refused, not both");
     }
+    leftOutTags = List.copyOf(leftOutTags);
   }
 }

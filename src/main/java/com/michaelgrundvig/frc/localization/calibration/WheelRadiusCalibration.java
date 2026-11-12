@@ -89,9 +89,12 @@ public final class WheelRadiusCalibration {
    * The wheel radius the spin says, in meters, from all the wheels together: the distance they
    * rolled, by the gyro, over how far they rotated.
    *
-   * @return NaN before the wheels have rotated
+   * @return NaN before the wheels have rotated, or while the gyro has seen no turn
    */
   public double radiusMeters() {
+    if (turnedRadians == 0) {
+      return Double.NaN;
+    }
     double rolledMeters = 0;
     double rotatedRadians = 0;
     for (int i = 0; i < distancesFromCenterMeters.length; i++) {
@@ -108,13 +111,14 @@ public final class WheelRadiusCalibration {
    * Each wheel's own radius, in meters, worked out the same way. A wheel far from the rest is worn
    * differently, or slipping.
    *
-   * @return for each wheel its radius, or NaN for a wheel that hasn't rotated
+   * @return for each wheel its radius, or NaN for a wheel that hasn't rotated, and for every wheel
+   *     while the gyro has seen no turn
    */
   public double[] radiiMeters() {
     double[] radii = new double[distancesFromCenterMeters.length];
     for (int i = 0; i < distancesFromCenterMeters.length; i++) {
       double rotatedRadians = rotatedRadians(i);
-      if (rotatedRadians > 0) {
+      if (rotatedRadians > 0 && turnedRadians != 0) {
         radii[i] = rolledMeters(i) / rotatedRadians;
       } else {
         radii[i] = Double.NaN;

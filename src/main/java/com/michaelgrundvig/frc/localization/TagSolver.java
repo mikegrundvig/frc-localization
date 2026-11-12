@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
 import org.wpilib.math.geometry.Pose3d;
+import org.wpilib.math.geometry.Rotation2d;
 import org.wpilib.math.geometry.Rotation3d;
 import org.wpilib.math.geometry.Transform3d;
 import org.wpilib.math.geometry.Translation2d;
@@ -12,6 +13,9 @@ import org.wpilib.math.geometry.Translation3d;
  * the lens, y left, and z up, as WPILib and PhotonVision give it.
  */
 public final class TagSolver {
+  /** A view of a tag nearer the camera than this is none: the vision software gave no view. */
+  private static final double NO_VIEW_BELOW_METERS = 1e-6;
+
   private TagSolver() {}
 
   /** The robot's pose, from its camera's pose on the field. */
@@ -23,6 +27,33 @@ public final class TagSolver {
   public static Pose3d robotFromTag(
       Pose3d fieldToTag, Transform3d cameraToTag, Transform3d robotToCamera) {
     return robotFromCamera(fieldToTag.transformBy(cameraToTag.inverse()), robotToCamera);
+  }
+
+  /**
+   * The robot's heading by one tag alone: of the two views a single tag allows, the one that puts
+   * the robot nearer a heading it is known to face roughly (the estimate's), since the other is the
+   * tag turned over. A view the vision software didn't give (its zero transform) is never chosen.
+   *
+   * @param best the camera's likelier view of the tag
+   * @param alternate its other view
+   * @param near the heading the robot is known to face roughly
+   */
+  public static Rotation2d robotHeadingByTag(
+      Pose3d fieldToTag,
+      Transform3d best,
+      Transform3d alternate,
+      Transform3d robotToCamera,
+      Rotation2d near) {
+    Rotation2d byBest = robotFromTag(fieldToTag, best, robotToCamera).toPose2d().getRotation();
+    boolean noAlternate = alternate.getTranslation().getNorm() < NO_VIEW_BELOW_METERS;
+    if (noAlternate) {
+      return byBest;
+    }
+    Rotation2d byAlternate =
+        robotFromTag(fieldToTag, alternate, robotToCamera).toPose2d().getRotation();
+    double bestMiss = Math.abs(byBest.minus(near).getRadians());
+    double alternateMiss = Math.abs(byAlternate.minus(near).getRadians());
+    return alternateMiss < bestMiss ? byAlternate : byBest;
   }
 
   /**

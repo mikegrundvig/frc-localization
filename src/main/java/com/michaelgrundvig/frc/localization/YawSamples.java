@@ -43,14 +43,16 @@ public final class YawSamples {
     Checks.on(ImuReadings.class)
         .check(
             "yawsRadians",
-            () ->
-                readings == times
-                    ? null
-                    : "must have one reading for each time: "
-                        + times
-                        + " times, "
-                        + readings
-                        + " readings")
+            () -> {
+              if (readings == times) {
+                return null;
+              }
+              return "must have one reading for each time: "
+                  + times
+                  + " times, "
+                  + readings
+                  + " readings";
+            })
         .orThrow();
     return new YawSamples(timesNanos.clone(), yawsRadians.clone(), times);
   }

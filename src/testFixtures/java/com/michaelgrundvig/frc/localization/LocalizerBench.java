@@ -47,8 +47,8 @@ public interface LocalizerBench {
     MODE,
     /** {@link Localizer#health}. */
     HEALTH,
-    /** {@link Localizer#decisions}. */
-    DECISIONS,
+    /** {@link Localizer#verdicts}. */
+    VERDICTS,
     /** {@link Localizer#fieldVelocities}. */
     FIELD_VELOCITIES,
     /** {@link Localizer#wheels}. */

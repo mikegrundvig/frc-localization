@@ -3,6 +3,7 @@ package com.michaelgrundvig.frc.localization;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.wpilib.math.geometry.Pose2d;
@@ -28,7 +29,7 @@ class OdometryHistoryTest {
   private static final int STEPS = 7;
 
   private final PoseFilter filter =
-      new PoseFilter(new PoseFilter.Considered(0, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45)), 4);
+      new PoseFilter(new ConsideredSizes(0, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45)), 4);
 
   /** Room for the start and seven steps, and no more. */
   private final OdometryHistory history =
@@ -139,6 +140,106 @@ class OdometryHistoryTest {
     }
     // Odometry alone is counted from the oldest step still kept.
     assertThat(history.varianceByOdometryAlone(1)).isCloseTo(0.0001 * (STEPS + 3), within(1e-12));
+  }
+
+  /**
+   * One step of its own, every value it keeps telling it apart from the others: the same steps go
+   * to a history that grows and to one with room for them all from the start.
+   */
+  private void addDistinct(OdometryHistory into, int k) {
+    YawSource turnedBy = k % 3 == 0 ? YawSource.WHEELS : YawSource.GYRO;
+    int step =
+        into.add(k * STEP_NANOS, 0.001 * k, 0.002 * k, 1e-4 * k, 1e-5 * k, turnedBy, 0.01 * k * k);
+    into.movedOverNewestStep(0.003 * k, -0.001 * k, 2e-5 * k);
+    if (k % 4 == 0) {
+      into.sawDriftOverNewestStep(1e-3 * k, 1e-6 * k);
+    }
+    into.reopenedTurnAtNewestStep(k % 2, 1e-7 * k);
+    filterAt(k, -0.5 * k);
+    into.store(step, filter);
+  }
+
+  /**
+   * A history that starts with room for four steps and grows to sixteen keeps every step's values
+   * where they were, in order, though its oldest step sat part way along its ring when it grew:
+   * read through every accessor, it is the same as one that had room from the start.
+   */
+  @Test
+  void aHistoryThatGrowsAcrossItsRingKeepsEveryStepInOrder() {
+    OdometryHistory growing = new OdometryHistory(4, 16, filter.uncertaintyLength());
+    OdometryHistory roomy = new OdometryHistory(32, filter.uncertaintyLength());
+    for (OdometryHistory each : List.of(growing, roomy)) {
+      each.start(0, YawSource.GYRO, 0);
+      filterAt(0, 0);
+      each.store(OdometryHistory.OLDEST_STEP, filter);
+      for (int k = 1; k <= 3; k++) {
+        addDistinct(each, k);
+      }
+      // Full at four: the two oldest go, so the oldest sits half way along the ring, and the next
+      // two wrap around it before the history must grow.
+      each.dropStepsNotNeededSince(2 * STEP_NANOS);
+      for (int k = 4; k <= 14; k++) {
+        addDistinct(each, k);
+      }
+    }
+
+    assertThat(growing.stepCount()).isEqualTo(roomy.stepCount()).isEqualTo(13);
+    for (int step = OdometryHistory.OLDEST_STEP; step < roomy.stepCount(); step++) {
+      assertSameStep(growing, roomy, step);
+    }
+    long middle = (growing.oldestTime() + growing.newestTime()) / 2 + STEP_NANOS / 3;
+    assertThat(growing.poseAt(middle, 0.3, 0.1, 2.0))
+        .isEqualTo(roomy.poseAt(middle, 0.3, 0.1, 2.0));
+    assertThat(growing.motionOver(4 * STEP_NANOS, 0.3))
+        .isEqualTo(roomy.motionOver(4 * STEP_NANOS, 0.3));
+    assertThat(growing.lastStepBefore(middle)).isEqualTo(roomy.lastStepBefore(middle));
+  }
+
+  /** One step read through every accessor, from two histories that should hold the same. */
+  private void assertSameStep(OdometryHistory growing, OdometryHistory roomy, int step) {
+    String at = "step " + step;
+    assertThat(growing.endTime(step)).as(at).isEqualTo(roomy.endTime(step));
+    assertThat(growing.travelForward(step)).as(at).isEqualTo(roomy.travelForward(step));
+    assertThat(growing.travelLeft(step)).as(at).isEqualTo(roomy.travelLeft(step));
+    assertThat(growing.wheelResidual(step)).as(at).isEqualTo(roomy.wheelResidual(step));
+    assertThat(growing.addedPositionVariance(step))
+        .as(at)
+        .isEqualTo(roomy.addedPositionVariance(step));
+    assertThat(growing.turnedBy(step)).as(at).isEqualTo(roomy.turnedBy(step));
+    assertThat(growing.yawAfter(step)).as(at).isEqualTo(roomy.yawAfter(step));
+    // Boxed, so a step with no drift seen, not a number in both, compares as the same.
+    assertThat(Double.valueOf(growing.driftSeenAtRest(step)))
+        .as(at)
+        .isEqualTo(Double.valueOf(roomy.driftSeenAtRest(step)));
+    assertThat(growing.driftSeenVariance(step)).as(at).isEqualTo(roomy.driftSeenVariance(step));
+    for (int camera = 0; camera < 2; camera++) {
+      assertThat(growing.turnReopenedBy(step, camera))
+          .as(at)
+          .isEqualTo(roomy.turnReopenedBy(step, camera));
+    }
+    assertThat(growing.varianceByOdometryAlone(step))
+        .as(at)
+        .isEqualTo(roomy.varianceByOdometryAlone(step));
+    assertThat(growing.xByOdometryAlone(step, 0.5))
+        .as(at)
+        .isEqualTo(roomy.xByOdometryAlone(step, 0.5));
+    assertThat(growing.yByOdometryAlone(step, 0.5))
+        .as(at)
+        .isEqualTo(roomy.yByOdometryAlone(step, 0.5));
+    assertThat(growing.velocityX(step)).as(at).isEqualTo(roomy.velocityX(step));
+    assertThat(growing.velocityY(step)).as(at).isEqualTo(roomy.velocityY(step));
+    assertThat(growing.yawRate(step)).as(at).isEqualTo(roomy.yawRate(step));
+    double[] grownUncertainty = new double[filter.uncertaintyLength()];
+    double[] roomyUncertainty = new double[filter.uncertaintyLength()];
+    growing.restore(step, filter);
+    double grownX = filter.x();
+    double grownY = filter.y();
+    filter.copyUncertaintyTo(grownUncertainty, 0);
+    roomy.restore(step, filter);
+    filter.copyUncertaintyTo(roomyUncertainty, 0);
+    assertThat(grownX).as(at).isEqualTo(filter.x());
+    assertThat(grownY).as(at).isEqualTo(filter.y());
+    assertThat(grownUncertainty).as(at).containsExactly(roomyUncertainty);
   }
 
   /** The motion over the last 30 ms: three steps of 0.03 m forward and 0.01 m left, turning. */

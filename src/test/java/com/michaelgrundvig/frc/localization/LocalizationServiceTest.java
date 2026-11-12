@@ -17,22 +17,23 @@ import com.michaelgrundvig.frc.world.field.Bump;
 import com.michaelgrundvig.frc.world.field.FieldModel;
 import com.michaelgrundvig.frc.world.field.Symmetry;
 import com.michaelgrundvig.frc.world.field.Terrain;
+import com.michaelgrundvig.frc.world.game.Rebuilt;
 import com.michaelgrundvig.frc.world.physical.Inertia;
-import com.michaelgrundvig.frc.world.physical.MassProperties;
 import com.michaelgrundvig.frc.world.physical.Vector3;
 import com.michaelgrundvig.frc.world.robot.Body;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import com.michaelgrundvig.frc.world.robot.CameraConfigBuilder;
-import com.michaelgrundvig.frc.world.robot.DrivetrainGeometry;
-import com.michaelgrundvig.frc.world.robot.DrivetrainGeometryModuleTypeBuilder;
+import com.michaelgrundvig.frc.world.robot.Drivetrain;
+import com.michaelgrundvig.frc.world.robot.DrivetrainModuleBuilder;
 import com.michaelgrundvig.frc.world.robot.Gearing;
-import com.michaelgrundvig.frc.world.robot.Imus;
+import com.michaelgrundvig.frc.world.robot.ImuMount;
 import com.michaelgrundvig.frc.world.robot.Joint;
-import com.michaelgrundvig.frc.world.robot.Link;
 import com.michaelgrundvig.frc.world.robot.Motor;
 import com.michaelgrundvig.frc.world.robot.Part;
+import com.michaelgrundvig.frc.world.robot.RevoluteJoint;
 import com.michaelgrundvig.frc.world.robot.RobotDefinition;
 import com.michaelgrundvig.frc.world.robot.RobotDefinitionBuilder;
+import com.michaelgrundvig.frc.world.robot.RobotMath;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -40,6 +41,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 import org.wpilib.fields.Field;
 import org.wpilib.fields.FieldTag;
@@ -47,7 +49,6 @@ import org.wpilib.fields.Fields;
 import org.wpilib.math.geometry.Pose2d;
 import org.wpilib.math.geometry.Pose3d;
 import org.wpilib.math.geometry.Rotation2d;
-import org.wpilib.math.geometry.Rotation3d;
 import org.wpilib.math.geometry.Transform2d;
 import org.wpilib.math.geometry.Transform3d;
 import org.wpilib.math.geometry.Translation2d;
@@ -62,7 +63,7 @@ import org.wpilib.math.kinematics.ChassisVelocities;
 class LocalizationServiceTest {
   private static final FieldModel FIELD =
       new FieldModel(
-          Fields.FRC_2026_REBUILT_WELDED.loadField(),
+          Rebuilt.GAME.layout(Fields.FRC_2026_REBUILT_WELDED.loadField()),
           Symmetry.ROTATED,
           List.of(),
           List.of(),
@@ -76,56 +77,40 @@ class LocalizationServiceTest {
 
   /** A forward camera at the front of the robot, tilted up 15 degrees. */
   private static final CameraConfig FRONT =
-      CameraConfig.builder()
-          .name("front")
-          .forward(Inches.of(12))
-          .left(Inches.of(0))
-          .up(Inches.of(12))
-          .roll(Degrees.of(0))
-          .tiltUp(Degrees.of(15))
-          .yaw(Degrees.of(0))
-          .sensor(
-              CameraConfig.Sensor.builder()
-                  .widthPixels(1280)
-                  .heightPixels(800)
-                  .fieldOfView(Degrees.of(80))
-                  .fieldOfViewAcross(CameraConfig.Across.DIAGONAL)
-                  .frameRate(Hertz.of(30))
+      CameraConfig.of(
+              "front",
+              CameraConfig.ImageSensor.of(1280, 800, Hertz.of(30))
+                  .fieldOfView(Degrees.of(80), CameraConfig.Across.DIAGONAL)
                   .latency(Milliseconds.of(30))
-                  .sightRange(Meters.of(7))
-                  .build())
+                  .sightRange(Meters.of(7)))
+          .at(Inches.of(12), Inches.of(0), Inches.of(12))
+          .facing(Degrees.of(15), Degrees.of(0))
+          .roll(Degrees.of(0))
           .noiseScale(1.0)
-          .build();
+          .measured();
 
   /** A 28 x 24 in frame, 60 kg. */
   private static final Body BODY =
-      Body.builder()
-          .frameLength(Inches.of(28))
-          .frameWidth(Inches.of(24))
-          .overallHeight(Inches.of(30))
-          .bumperThickness(Inches.of(3.5))
-          .bumperBottom(Inches.of(2.5))
-          .bumperTop(Inches.of(5.75))
+      Body.frame(Inches.of(28), Inches.of(24), Inches.of(30))
+          .bumpers(Inches.of(3.5), Inches.of(2.5), Inches.of(5.75))
           .weight(Kilograms.of(60))
           .inertia(
               Body.Turning.tensor(
                   Inertia.builder().ixx(6).iyy(6).izz(6).ixy(0).ixz(0).iyz(0).build()))
-          .cg(new Translation3d(0, 0, 0.2))
-          .build();
+          .cg(new Translation3d(0, 0, 0.2));
 
   /** A 28 x 24 in swerve robot with the front camera, its IMUs not yet measured. */
   private static final RobotDefinition DEFINITION =
-      RobotDefinition.builder()
-          .name("test")
-          .body(BODY)
-          .drivetrain(
-              DrivetrainGeometry.inset(
-                  DrivetrainGeometry.ModuleType.builder()
+      RobotDefinition.of(
+              "test",
+              BODY,
+              Drivetrain.inset(
+                  Drivetrain.Module.builder()
                       .driveMotor(Motor.KRAKEN_X60)
                       .steerMotor(Motor.KRAKEN_X44)
                       .wheelRadius(Inches.of(2))
-                      .driveGearing(Gearing.builder().ratio(6.75).efficiency(1.0).build())
-                      .steerGearing(Gearing.builder().ratio(12.8).efficiency(1.0).build())
+                      .driveGearing(Gearing.of(6.75))
+                      .steerGearing(Gearing.of(12.8))
                       .couplingRatio(0)
                       .wheelCoefficientOfFriction(1.2)
                       .driveInertia(KilogramSquareMeters.of(0.001))
@@ -133,9 +118,8 @@ class LocalizationServiceTest {
                       .build(),
                   BODY,
                   Inches.of(2.625)))
-          .imus(Imus.UNCHECKED)
-          .cameras(List.of(FRONT))
-          .build();
+          .withCameras(FRONT)
+          .withBackupImu(ImuMount.UNCHECKED);
 
   /** Localization with the robot placed in front of the hub, to 5 cm and half a degree. */
   private static LocalizationService placed() {
@@ -150,27 +134,26 @@ class LocalizationServiceTest {
   private static LocalizationService placed(
       DriveKinematicsModel kinematics, RobotDefinition robot) {
     return new LocalizationService(
-        new PoseEstimator(
-            EstimatorConfig.DEFAULTS,
-            FIELD::contains,
-            FIELD.tags().keySet(),
-            new PoseReset(0, ROBOT, PoseCovariance.fromStdDevs(0.05, 0.05, 0.01), "placed")),
-        kinematics,
         FIELD,
         FIELD.terrain(),
         robot,
+        new DefaultLocalizer(
+            new PoseEstimator(
+                EstimatorConfig.defaults(),
+                FIELD::contains,
+                FIELD.tags().keySet(),
+                new PoseReset(0, ROBOT, PoseCovariance.fromStdDevs(0.05, 0.05, 0.01), "placed")),
+            kinematics,
+            FIELD.terrain(),
+            robot,
+            SlipCheck.Settings.defaults()),
         0.02);
   }
 
   /** A turret carrying a camera: it turns about the robot's up, 10 cm above its center. */
-  private static final Joint.Revolute TURRET =
-      Joint.Revolute.builder()
-          .label("turret")
-          .parent(Part.CHASSIS)
-          .origin(new Transform3d(0, 0, 0.1, Rotation3d.ZERO))
-          .axis(new Vector3(0, 0, 1))
-          .link(Link.builder().label("turret").mass(MassProperties.NONE).build())
-          .build();
+  private static final RevoluteJoint TURRET =
+      Joint.pivot("turret", Part.CHASSIS, new Vector3(0, 0, 1))
+          .at(Meters.of(0), Meters.of(0), Meters.of(0.1));
 
   /**
    * A camera on a joint is solved from where its joint had carried it when the image was taken: a
@@ -195,12 +178,12 @@ class LocalizationServiceTest {
     following.joints(now + LOOP_NANOS, Map.of(TURRET, 2 * turned));
     TagDetections seen =
         hubFace(new Pose3d(ROBOT), new Transform3d(Pose3d.ZERO, mount), "turret", now);
-    VisionResult[] result = new VisionResult[1];
+    ImageVerdict[] result = new ImageVerdict[1];
     loop(following, now + LOOP_NANOS, () -> result[0] = following.camera(seen));
 
     LocalizationService notFollowing = placed(turreted);
     standStill(notFollowing, 10);
-    VisionResult[] unfollowed = new VisionResult[1];
+    ImageVerdict[] unfollowed = new ImageVerdict[1];
     loop(notFollowing, now + LOOP_NANOS, () -> unfollowed[0] = notFollowing.camera(seen));
 
     VisionMeasurement measured = Objects.requireNonNull(result[0].measurement());
@@ -226,9 +209,9 @@ class LocalizationServiceTest {
                 .pitchRadians(pitch)
                 .rollRadians(roll)
                 // Gravity, as an accelerometer tilted so feels it standing still.
-                .forwardAccelerationMetersPerSecSq(-ImuReadings.STANDARD_GRAVITY * Math.sin(pitch))
+                .forwardAccelerationMetersPerSecSq(-RobotMath.GRAVITY * Math.sin(pitch))
                 .leftAccelerationMetersPerSecSq(
-                    ImuReadings.STANDARD_GRAVITY * Math.sin(roll) * Math.cos(pitch))
+                    RobotMath.GRAVITY * Math.sin(roll) * Math.cos(pitch))
                 .yaws(YawSamples.of(new long[] {nanos}, new double[] {0.3}))
                 .build())
         .backupImu(ImuReadings.NONE)
@@ -260,11 +243,11 @@ class LocalizationServiceTest {
   /** The front camera's exact view of the hub's near face, from the robot, taken then. */
   private static TagDetections hubFace(long takenNanos) {
     Pose3d cameraPose = new Pose3d(ROBOT).transformBy(FRONT.robotToCamera());
-    List<TagDetections.Tag> tags = new ArrayList<>();
+    List<TagDetections.Sighting> tags = new ArrayList<>();
     for (int id : new int[] {25, 26}) {
       Transform3d view = new Transform3d(cameraPose, FIELD.tag(id).orElseThrow());
       tags.add(
-          new TagDetections.Tag(
+          new TagDetections.Sighting(
               id,
               List.of(
                   new Translation2d(600, 380),
@@ -295,12 +278,12 @@ class LocalizationServiceTest {
     LocalizationService localization = placed();
     long now = standStill(localization, 10);
 
-    VisionResult[] result = new VisionResult[1];
+    ImageVerdict[] result = new ImageVerdict[1];
     LocalizationOutput output =
         loop(localization, now + LOOP_NANOS, () -> result[0] = localization.camera(hubFace(now)));
 
     assertThat(result[0].refused()).isNull();
-    assertThat(result[0].outcome()).startsWith("heading-constrained: 2 tags at ");
+    assertThat(result[0].described()).startsWith("heading-constrained: 2 tags at ");
     assertThat(output.frames()).hasSize(1);
     FrameVerdict frame = output.frames().get(0);
     assertThat(frame.camera()).isEqualTo("front");
@@ -309,6 +292,7 @@ class LocalizationServiceTest {
     FrameVerdict.Measured measured = frame.measured().orElseThrow();
     assertThat(frame.verdict()).isEqualTo(Verdict.ACCEPTED);
     assertThat(measured.solver()).isEqualTo(VisionMeasurement.Solver.HEADING_CONSTRAINED);
+    assertThat(measured.innovationMeters()).isLessThan(1e-6);
     assertThat(measured.pose().getTranslation().getDistance(ROBOT.getTranslation()))
         .isLessThan(1e-6);
     assertThat(frame.tags()).extracting(TagVerdict::tag).containsExactly(25, 26);
@@ -316,12 +300,52 @@ class LocalizationServiceTest {
         .allSatisfy(
             tag -> {
               assertThat(tag.verdict()).isEqualTo(Verdict.ACCEPTED);
-              assertThat(tag.innovationMeters()).isLessThan(1e-6);
-              assertThat(tag.chiSquared()).isLessThanOrEqualTo(tag.threshold());
+              assertThat(tag.value()).as("the χ²").isLessThanOrEqualTo(tag.threshold());
               assertThat(tag.threshold())
-                  .isEqualTo(EstimatorConfig.DEFAULTS.gateChiSquaredPosition());
+                  .isEqualTo(EstimatorConfig.defaults().gateChiSquaredPosition());
             });
     assertThat(output.report().health().orElseThrow().accepted()).isEqualTo(1);
+  }
+
+  /**
+   * Every image the robot was given is among the update's frames, each tag with what became of it:
+   * one the robot left out unsolved, with its own reason; and one solved without a tag it saw, that
+   * tag with why it was left out (off the field's layout here) beside the tags the measurement
+   * rested on. Only the robot's own reasons leave an image out unsolved.
+   */
+  @Test
+  void imagesTheRobotLeftOutAndTagsThePipelineLeftOutAreFramesToo() {
+    LocalizationService localization = placed();
+    long now = standStill(localization, 10);
+    TagDetections face = hubFace(now);
+    List<TagDetections.Sighting> withAStranger = new ArrayList<>(face.tags());
+    withAStranger.add(
+        new TagDetections.Sighting(
+            99, face.tags().get(0).corners(), Transform3d.ZERO, Transform3d.ZERO, 0.1));
+
+    LocalizationOutput output =
+        loop(
+            localization,
+            now + LOOP_NANOS,
+            () -> {
+              localization.leftOut(face, Verdict.TURNED_OFF);
+              localization.camera(new TagDetections(now, "front", withAStranger, null));
+            });
+
+    assertThat(output.frames()).hasSize(2);
+    FrameVerdict turnedOff = output.frames().get(0);
+    assertThat(turnedOff.verdict()).isEqualTo(Verdict.TURNED_OFF);
+    assertThat(turnedOff.measured()).isEmpty();
+    assertThat(turnedOff.tags())
+        .extracting(tag -> tag.tag() + " " + tag.verdict())
+        .containsExactly("25 TURNED_OFF", "26 TURNED_OFF");
+    FrameVerdict solved = output.frames().get(1);
+    assertThat(solved.verdict()).isEqualTo(Verdict.ACCEPTED);
+    assertThat(solved.tags())
+        .extracting(tag -> tag.tag() + " " + tag.verdict())
+        .containsExactly("25 ACCEPTED", "26 ACCEPTED", "99 UNKNOWN_TAGS");
+    assertThatThrownBy(() -> localization.leftOut(face, Verdict.GATED))
+        .hasMessage("the robot leaves an image out unsolved for its own reasons: GATED");
   }
 
   /**
@@ -344,13 +368,15 @@ class LocalizationServiceTest {
     }
     localization.venue(
         new FieldModel(
-            new Field("Surveyed", "", "", null, FIELD.length(), FIELD.width(), "frc", surveyed),
+            Rebuilt.GAME.layout(
+                new Field(
+                    "Surveyed", "", "", null, FIELD.length(), FIELD.width(), "frc", surveyed)),
             Symmetry.ROTATED,
             List.of(),
             List.of(),
             List.of()));
 
-    VisionResult[] result = new VisionResult[1];
+    ImageVerdict[] result = new ImageVerdict[1];
     LocalizationOutput output =
         loop(localization, now + LOOP_NANOS, () -> result[0] = localization.camera(hubFace(now)));
 
@@ -366,7 +392,8 @@ class LocalizationServiceTest {
     fewer.remove(0);
     FieldModel other =
         new FieldModel(
-            new Field("Other", "", "", null, FIELD.length(), FIELD.width(), "frc", fewer),
+            Rebuilt.GAME.layout(
+                new Field("Other", "", "", null, FIELD.length(), FIELD.width(), "frc", fewer)),
             Symmetry.ROTATED,
             List.of(),
             List.of(),
@@ -383,7 +410,7 @@ class LocalizationServiceTest {
     LocalizationService localization = placed();
     long now = standStill(localization, 10);
 
-    VisionResult[] result = new VisionResult[1];
+    ImageVerdict[] result = new ImageVerdict[1];
     LocalizationOutput output =
         loop(
             localization,
@@ -402,7 +429,7 @@ class LocalizationServiceTest {
     assertThat(output.report().health().orElseThrow().accepted()).isZero();
     assertThatThrownBy(() -> localization.hold(hubFace(now), null, Verdict.GATED))
         .as("the estimator's verdicts are its own")
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("the robot holds an image back for its own reasons: GATED");
   }
 
   /**
@@ -422,7 +449,7 @@ class LocalizationServiceTest {
     long taken = now + LOOP_NANOS;
     loop(localization, taken, () -> {});
 
-    VisionResult[] results = new VisionResult[2];
+    ImageVerdict[] results = new ImageVerdict[2];
     loop(localization, taken + LOOP_NANOS, () -> results[0] = localization.camera(hubFace(taken)));
     loop(
         localization,
@@ -451,7 +478,7 @@ class LocalizationServiceTest {
     PoseReset roughly =
         new PoseReset(now, ROBOT, PoseCovariance.fromStdDevs(0.05, 0.05, 0.5), "facing roughly");
 
-    VisionResult[] results = new VisionResult[2];
+    ImageVerdict[] results = new ImageVerdict[2];
     loop(
         asked,
         now,
@@ -490,27 +517,27 @@ class LocalizationServiceTest {
     LocalizationService localization = placed();
     long now = standStill(localization, 10);
     localization.vision(
-        VisionConfigBuilder.builder(VisionConfig.DEFAULTS).maxDistanceMeters(0.5).build());
+        VisionConfigBuilder.builder(VisionConfig.defaults()).maxDistanceMeters(0.5).build());
 
-    VisionResult[] result = new VisionResult[1];
+    ImageVerdict[] result = new ImageVerdict[1];
     LocalizationOutput output =
         loop(localization, now + LOOP_NANOS, () -> result[0] = localization.camera(hubFace(now)));
 
     assertThat(result[0].refused()).isEqualTo(Verdict.TOO_FAR);
-    assertThat(result[0].outcome())
+    assertThat(result[0].described())
         .isEqualTo(Verdict.TOO_FAR.describe(result[0].distanceMeters(), 0.5))
         .startsWith("too far: ");
     FrameVerdict refused = output.frames().get(0);
     assertThat(output.frames()).hasSize(1);
     assertThat(refused.verdict()).isEqualTo(Verdict.TOO_FAR);
     assertThat(refused.measured()).as("never weighed").isEmpty();
-    assertThat(refused.reason()).isEqualTo(result[0].outcome());
+    assertThat(refused.described()).isEqualTo(result[0].described());
     assertThat(refused.captureNanos()).isEqualTo(now);
     assertThat(refused.tags())
-        .extracting(TagVerdict::tag, TagVerdict::verdict, TagVerdict::reason)
+        .extracting(TagVerdict::tag, TagVerdict::verdict, TagVerdict::described)
         .containsExactly(
-            tuple(25, Verdict.TOO_FAR, result[0].outcome()),
-            tuple(26, Verdict.TOO_FAR, result[0].outcome()));
+            tuple(25, Verdict.TOO_FAR, result[0].described()),
+            tuple(26, Verdict.TOO_FAR, result[0].described()));
     assertThat(output.report().health().orElseThrow().rejected())
         .as("the estimator never saw it")
         .isZero();
@@ -538,12 +565,12 @@ class LocalizationServiceTest {
     assertThat(gated.verdict()).isEqualTo(Verdict.GATED);
     assertThat(measured.chiSquared()).isGreaterThan(gated.threshold()).isEqualTo(gated.value());
     assertThat(measured.innovationMeters()).isCloseTo(1.5, within(0.01));
-    assertThat(gated.reason()).startsWith("gate: ").endsWith("> 13.8");
+    assertThat(gated.described()).startsWith("gate: ").endsWith("> 13.8");
     assertThat(output.frames().get(0).tags())
         .allSatisfy(
             tag -> {
               assertThat(tag.accepted()).isFalse();
-              assertThat(tag.reason()).as("each tag, as its frame").isEqualTo(gated.reason());
+              assertThat(tag.described()).as("each tag, as its frame").isEqualTo(gated.described());
             });
     assertThat(output.report().pose().getTranslation().getDistance(ROBOT.getTranslation()))
         .isLessThan(1e-6);
@@ -572,7 +599,7 @@ class LocalizationServiceTest {
     FrameVerdict refused = output.frames().get(0);
     assertThat(refused.verdict()).isEqualTo(Verdict.BEFORE_RESET);
     assertThat(refused.measured().orElseThrow().chiSquared()).isNaN();
-    assertThat(refused.reason()).isEqualTo("before the robot was last placed or recovered");
+    assertThat(refused.described()).isEqualTo("before the robot was last placed or recovered");
   }
 
   /**
@@ -700,10 +727,10 @@ class LocalizationServiceTest {
   @Test
   void itsRecordsRefuseWhatTheyCantBe() {
     assertThatThrownBy(() -> new LoopContext(-1, true))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("a time on the robot's clock: -1");
     assertThatThrownBy(
             () ->
-                new VisionResult(
+                new ImageVerdict(
                     hubFace(T0),
                     null,
                     null,
@@ -711,8 +738,9 @@ class LocalizationServiceTest {
                     Double.NaN,
                     Double.NaN,
                     Double.NaN,
-                    Double.NaN))
-        .isInstanceOf(IllegalArgumentException.class);
+                    Double.NaN,
+                    List.of()))
+        .hasMessage("an image becomes a measurement or is refused, not both");
   }
 
   /**
@@ -741,7 +769,7 @@ class LocalizationServiceTest {
     standStill(trusted, 10);
     doubted.mountDoubt("front", 0.2, 3.0);
 
-    VisionResult[] results = new VisionResult[2];
+    ImageVerdict[] results = new ImageVerdict[2];
     LocalizationOutput output =
         loop(doubted, now + LOOP_NANOS, () -> results[0] = doubted.camera(hubFace(now)));
     loop(trusted, now + LOOP_NANOS, () -> results[1] = trusted.camera(hubFace(now)));
@@ -861,6 +889,95 @@ class LocalizationServiceTest {
         .isCloseTo(3.0, within(0.2));
   }
 
+  /**
+   * One way a robot's motion reaches its images, with a localizer that doesn't say how the robot
+   * moves (WPILib's), so the turning and the speed come from the IMU and the wheels alone.
+   *
+   * @param name what the row is
+   * @param imusLost whether both IMUs are lost, leaving the wheels to say the turning
+   * @param velocity how the robot drives
+   * @param spoil what becomes of each loop's readings before the service sees them
+   * @param verdict what becomes of each of its images
+   */
+  private record MotionRow(
+      String name,
+      boolean imusLost,
+      ChassisVelocities velocity,
+      UnaryOperator<DrivetrainReadings> spoil,
+      Verdict verdict) {}
+
+  /** Both IMUs reporting a yaw, but a rate that isn't a number. */
+  private static DrivetrainReadings rateNotANumber(DrivetrainReadings readings) {
+    return DrivetrainReadingsBuilder.builder(readings)
+        .gyro(
+            ImuReadingsBuilder.builder(readings.gyro()).yawRateRadiansPerSecond(Double.NaN).build())
+        .backupImu(
+            ImuReadingsBuilder.builder(readings.backupImu())
+                .yawRateRadiansPerSecond(Double.NaN)
+                .build())
+        .build();
+  }
+
+  /** The wheels' velocities not a number. */
+  private static DrivetrainReadings wheelsNotANumber(DrivetrainReadings readings) {
+    return DrivetrainReadingsBuilder.builder(readings)
+        .velocities(new ChassisVelocities(Double.NaN, Double.NaN, Double.NaN))
+        .build();
+  }
+
+  /**
+   * A motion that isn't a number never throws out of the loop, and never lets a blurred image
+   * through: an IMU whose rate isn't a number is lost, and the wheels say the turning; wheels whose
+   * velocities aren't numbers, with no IMU, refuse the image saying so; a fast turn with no IMU is
+   * still judged by the wheels.
+   */
+  @Test
+  void aMotionThatIsntANumberCostsTheImageNeverTheLoop() {
+    List<MotionRow> rows =
+        List.of(
+            new MotionRow(
+                "the IMUs' rate isn't a number",
+                false,
+                new ChassisVelocities(),
+                LocalizationServiceTest::rateNotANumber,
+                Verdict.GIVEN),
+            new MotionRow(
+                "the wheels' velocities aren't numbers, with no IMU",
+                true,
+                new ChassisVelocities(),
+                LocalizationServiceTest::wheelsNotANumber,
+                Verdict.MOTION_NOT_A_NUMBER),
+            new MotionRow(
+                "a fast turn, with no IMU",
+                true,
+                new ChassisVelocities(0, 0, 8.0),
+                UnaryOperator.identity(),
+                Verdict.TURNING));
+    for (MotionRow row : rows) {
+      LocalizationService localization =
+          new LocalizationService(FIELD, DEFINITION, new WpilibLocalizer(DEFINITION, FIELD), 0.02);
+      ScriptedDrivetrain robot = scripted();
+      robot.gyroLost = row.imusLost();
+      robot.backupLost = row.imusLost();
+      List<Verdict> verdicts = new ArrayList<>();
+      // A second and a half of loops, the robot up to speed in the first second: its images after.
+      for (int k = 0; k < 75; k++) {
+        DrivetrainReadings readings = row.spoil().apply(robot.loop(row.velocity()));
+        localization.drivetrain(readings, new LoopContext(robot.now(), true));
+        localization.camera(hubFace(robot.truth3d(), robot.now()));
+        LocalizationOutput output = localization.update();
+        if (k >= 50) {
+          output.frames().forEach(frame -> verdicts.add(frame.verdict()));
+        }
+      }
+
+      assertThat(verdicts).as(row.name()).isNotEmpty().containsOnly(row.verdict());
+      assertThat(localization.capture(robot.now()).recentYawRateRadiansPerSecond())
+          .as("%s: the fastest it turned lately", row.name())
+          .isFinite();
+    }
+  }
+
   private static double headingError(LocalizationService localization, ScriptedDrivetrain robot) {
     return Math.abs(
         localization.pose().getRotation().minus(robot.truth().getRotation()).getDegrees());
@@ -922,7 +1039,7 @@ class LocalizationServiceTest {
     assertThat(nearly).isEqualTo(pose);
     assertThat(Fingerprint.of(nearly)).isNotEqualTo(Fingerprint.of(pose));
     assertThatThrownBy(() -> Fingerprint.of(new Object()))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("no fingerprint for a java.lang.Object: teach Fingerprint it");
   }
 
   /**
@@ -935,16 +1052,16 @@ class LocalizationServiceTest {
     RobotDefinition grippy =
         RobotDefinitionBuilder.builder(DEFINITION)
             .drivetrain(
-                DrivetrainGeometry.inset(
-                    DrivetrainGeometryModuleTypeBuilder.builder(DEFINITION.drivetrain().module(0))
+                Drivetrain.inset(
+                    DrivetrainModuleBuilder.builder(DEFINITION.drivetrain().module(0))
                         .wheelCoefficientOfFriction(2.255)
                         .build(),
                     BODY,
                     Inches.of(2.625)))
             .build();
 
-    assertThat(DefaultLocalizer.doubts(DEFINITION)).isEmpty();
-    assertThat(DefaultLocalizer.doubts(grippy))
+    assertThat(DefaultLocalizer.doubts(DEFINITION, SlipCheck.Settings.defaults())).isEmpty();
+    assertThat(DefaultLocalizer.doubts(grippy, SlipCheck.Settings.defaults()))
         .singleElement()
         .satisfies(
             doubt -> {
@@ -959,8 +1076,12 @@ class LocalizationServiceTest {
             new LocalizationService(
                 FIELD,
                 grippy,
-                new SwerveKinematicsModel(grippy.moduleTranslations()),
-                EstimatorConfig.DEFAULTS,
+                new DefaultLocalizer(
+                    FIELD,
+                    grippy,
+                    new SwerveKinematicsModel(grippy.moduleTranslations()),
+                    EstimatorConfig.defaults(),
+                    SlipCheck.Settings.defaults()),
                 0.02))
         .isNotNull();
   }
@@ -976,16 +1097,21 @@ class LocalizationServiceTest {
 
   /** The robot placed in front of the hub, with the test bump ahead of it. */
   private static LocalizationService beforeTheBump() {
+    Terrain bump = new Terrain(List.of(BUMP));
     return new LocalizationService(
-        new PoseEstimator(
-            EstimatorConfig.DEFAULTS,
-            FIELD::contains,
-            FIELD.tags().keySet(),
-            new PoseReset(0, ROBOT, PoseCovariance.fromStdDevs(0.05, 0.05, 0.01), "placed")),
-        new SwerveKinematicsModel(DEFINITION.moduleTranslations()),
         FIELD,
-        new Terrain(List.of(BUMP)),
+        bump,
         DEFINITION,
+        new DefaultLocalizer(
+            new PoseEstimator(
+                EstimatorConfig.defaults(),
+                FIELD::contains,
+                FIELD.tags().keySet(),
+                new PoseReset(0, ROBOT, PoseCovariance.fromStdDevs(0.05, 0.05, 0.01), "placed")),
+            new SwerveKinematicsModel(DEFINITION.moduleTranslations()),
+            bump,
+            DEFINITION,
+            SlipCheck.Settings.defaults()),
         0.02);
   }
 
@@ -998,11 +1124,11 @@ class LocalizationServiceTest {
   private static TagDetections hubFace(
       Pose3d robot, Transform3d mount, String camera, long takenNanos) {
     Pose3d cameraPose = robot.transformBy(mount);
-    List<TagDetections.Tag> tags = new ArrayList<>();
+    List<TagDetections.Sighting> tags = new ArrayList<>();
     for (int id : new int[] {25, 26}) {
       Transform3d view = new Transform3d(cameraPose, FIELD.tag(id).orElseThrow());
       tags.add(
-          new TagDetections.Tag(
+          new TagDetections.Sighting(
               id,
               List.of(
                   new Translation2d(600, 380),

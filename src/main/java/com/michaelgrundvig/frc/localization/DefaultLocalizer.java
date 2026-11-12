@@ -5,6 +5,7 @@ import com.michaelgrundvig.frc.world.field.FieldModel;
 import com.michaelgrundvig.frc.world.field.Terrain;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import com.michaelgrundvig.frc.world.robot.RobotDefinition;
+import com.michaelgrundvig.frc.world.robot.RobotMath;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -32,17 +33,17 @@ import org.wpilib.math.kinematics.ChassisVelocities;
  * {@link DriveKinematicsModel}, so swerve, tank, or any other localizes the same way.
  */
 public final class DefaultLocalizer implements Localizer {
-  /**
-   * On known raised ground, a tilt up to this much steeper than its slopes is still the ground's:
-   * bumpers, suspension, and the IMU's mount.
-   */
-  private static final double GROUND_SLOPE_MARGIN = Math.toRadians(3);
-
   /** How far off a surface's footprint the estimate may put the robot and still be on it. */
   private static final double MAX_GROUND_REACH_METERS = 1.0;
 
   private final PoseEstimator estimator;
   private final Terrain ground;
+
+  /**
+   * On known raised ground, a tilt up to this much steeper than its slopes is still the ground's
+   * ({@link EstimatorConfig#groundSlopeMarginDegrees}), in radians.
+   */
+  private final double groundSlopeMargin;
 
   /** How far the wheels reach from the robot's center, in meters. */
   private final double wheelReach;
@@ -68,7 +69,7 @@ public final class DefaultLocalizer implements Localizer {
   private LocalizationEstimate estimate;
 
   /** What the estimator decided about each measurement in the last update. */
-  private List<VisionDecision> decisions = List.of();
+  private List<MeasurementVerdict> verdicts = List.of();
 
   /** The robot's cameras, by name, in the order of its definition. */
   private final List<String> cameras = new ArrayList<>();
@@ -87,18 +88,38 @@ public final class DefaultLocalizer implements Localizer {
    * @param kinematics how the drivetrain's wheels move the robot: {@link SwerveKinematicsModel} for
    *     the robot's swerve modules
    * @param config how the estimator weighs its sources
+   * @param slipCheck how closely the wheels must agree with the IMU before they are doubted for
+   *     sliding over the floor together ({@link SlipCheck})
    */
   public DefaultLocalizer(
       FieldModel field,
       RobotDefinition robot,
       DriveKinematicsModel kinematics,
-      EstimatorConfig config) {
+      EstimatorConfig config,
+      SlipCheck.Settings slipCheck) {
+    this(field, robot, kinematics, config, slipCheck, HeadingCorrection.EVERY_FIX);
+  }
+
+  /** The same, its estimator correcting the heading another way: for the consistency study. */
+  private DefaultLocalizer(
+      FieldModel field,
+      RobotDefinition robot,
+      DriveKinematicsModel kinematics,
+      EstimatorConfig config,
+      SlipCheck.Settings slipCheck,
+      HeadingCorrection heading) {
     this(
         new PoseEstimator(
-            config, field::contains, field.tags().keySet(), robot.cameras(), notPlacedYet(field)),
+            config,
+            heading,
+            field::contains,
+            field.tags().keySet(),
+            robot.cameras(),
+            notPlacedYet(field)),
         kinematics,
         field.terrain(),
-        robot);
+        robot,
+        slipCheck);
   }
 
   /**
@@ -109,13 +130,17 @@ public final class DefaultLocalizer implements Localizer {
    * @param kinematics how the drivetrain's wheels move the robot
    * @param terrain the ground the robot drives on: a tilt it explains keeps the wheels trusted
    * @param robot what the robot is: its wheels, its IMUs, and its cameras
+   * @param slipCheck how closely the wheels must agree with the IMU before they are doubted for
+   *     sliding over the floor together ({@link SlipCheck})
    */
   public DefaultLocalizer(
       PoseEstimator estimator,
       DriveKinematicsModel kinematics,
       Terrain terrain,
-      RobotDefinition robot) {
+      RobotDefinition robot,
+      SlipCheck.Settings slipCheck) {
     this.estimator = estimator;
+    groundSlopeMargin = Math.toRadians(estimator.config().groundSlopeMarginDegrees());
     odometrySteps = new OdometrySteps(kinematics);
     double reach = 0;
     for (Translation2d wheel : robot.moduleTranslations()) {
@@ -124,11 +149,12 @@ public final class DefaultLocalizer implements Localizer {
     wheelReach = reach;
     ground = terrain;
     // The most the tread's grip can change the robot's velocity is its friction times gravity.
-    double gripMetersPerSecSq =
-        robot.drivetrain().wheelCoefficientOfFriction() * ImuReadings.STANDARD_GRAVITY;
+    double gripMetersPerSecSq = robot.drivetrain().wheelCoefficientOfFriction() * RobotMath.GRAVITY;
     wheelsAgainstImu =
         new WheelsAgainstImu(
-            new SlipCheck(SlipCheck.Settings.DEFAULTS, reach, gripMetersPerSecSq), robot.imus());
+            new SlipCheck(slipCheck, reach, gripMetersPerSecSq),
+            robot.gyroMount(),
+            robot.backupImu());
     for (CameraConfig camera : robot.cameras()) {
       cameras.add(camera.name());
     }
@@ -137,21 +163,36 @@ public final class DefaultLocalizer implements Localizer {
 
   /**
    * How a robot's configuration asks for this localizer with its own weights: a maker of one for a
-   * swerve robot, its estimator weighing its sources as the configuration says.
+   * swerve robot, its estimator weighing its sources as the configuration says, and its wheels
+   * checked against the IMU as the slip check's settings say.
    */
-  public static LocalizerMaker with(EstimatorConfig config) {
+  public static LocalizerMaker with(EstimatorConfig config, SlipCheck.Settings slipCheck) {
+    return with(config, slipCheck, HeadingCorrection.EVERY_FIX);
+  }
+
+  /**
+   * The same, its estimator correcting the heading another way than the default localizer does: for
+   * the consistency study, which compares the ways ({@link HeadingCorrection}).
+   */
+  public static LocalizerMaker with(
+      EstimatorConfig config, SlipCheck.Settings slipCheck, HeadingCorrection heading) {
     return (robot, field) ->
         new DefaultLocalizer(
-            field, robot, new SwerveKinematicsModel(robot.moduleTranslations()), config);
+            field,
+            robot,
+            new SwerveKinematicsModel(robot.moduleTranslations()),
+            config,
+            slipCheck,
+            heading);
   }
 
   /**
    * What this localizer doubts of a robot, said as it starts: treads said to grip at or past the
    * jolt the slip check calls a whole collision, where it can't tell a slide from a collision.
    */
-  public static List<Finding> doubts(RobotDefinition robot) {
+  public static List<Finding> doubts(RobotDefinition robot, SlipCheck.Settings slipCheck) {
     double grip = robot.drivetrain().wheelCoefficientOfFriction();
-    double most = SlipCheck.Settings.DEFAULTS.joltMetersPerSecSq() / ImuReadings.STANDARD_GRAVITY;
+    double most = slipCheck.joltMetersPerSecSq() / RobotMath.GRAVITY;
     if (grip < most) {
       return List.of();
     }
@@ -213,7 +254,10 @@ public final class DefaultLocalizer implements Localizer {
     estimate = estimator.estimate();
   }
 
-  /** The estimator weighs the placement like any measurement, by how sure the teller is. */
+  /**
+   * The estimator weighs the placement like any measurement, by how sure the teller is. Its heading
+   * is a person's word: no image is solved with it until a camera backs it ({@link #headingAt}).
+   */
   @Override
   public void place(PoseReset placed) {
     estimator.reset(placed);
@@ -231,8 +275,9 @@ public final class DefaultLocalizer implements Localizer {
   }
 
   /**
-   * With {@link EstimatorConfig.HeadingCorrection#HEADING_MEASUREMENTS_AND_MOUNT_DOUBT} the
-   * estimator takes the doubt as part of the camera's repeated errors.
+   * The doubt is reported in the cameras' trust ({@link #trust}). Where the heading is corrected by
+   * {@link HeadingCorrection#HEADING_MEASUREMENTS_AND_MOUNT_DOUBT}, the estimator also takes it as
+   * part of the camera's repeated errors.
    */
   @Override
   public void mountDoubt(String camera, double doubtMeters, double distanceMeters) {
@@ -246,7 +291,7 @@ public final class DefaultLocalizer implements Localizer {
     for (VisionMeasurement measurement : taken) {
       estimator.addVision(measurement);
     }
-    decisions = List.copyOf(estimator.update());
+    verdicts = List.copyOf(estimator.update());
     estimate = estimator.estimate();
   }
 
@@ -268,9 +313,10 @@ public final class DefaultLocalizer implements Localizer {
   }
 
   /**
-   * Empty while the heading is a driver's reset no camera has backed. A heading in doubt solves no
-   * image, however sure the driver's reset says it is. Solved with it, an image lands off by its
-   * error, and only an image solved without it can back it.
+   * Empty while the heading is a person's word no camera has backed: a placement's, or a driver's
+   * reset ({@link HeadingDoubt}). A heading in doubt solves no image, however sure the person says
+   * it is. Solved with it, an image lands off by its error, and only an image solved without it can
+   * back it.
    */
   @Override
   public Optional<Rotation2d> headingAt(long timestampNanos) {
@@ -302,8 +348,8 @@ public final class DefaultLocalizer implements Localizer {
 
   /** In the order they were applied: those that couldn't be, then the rest by capture time. */
   @Override
-  public Optional<List<VisionDecision>> decisions() {
-    return Optional.of(decisions);
+  public Optional<List<MeasurementVerdict>> verdicts() {
+    return Optional.of(verdicts);
   }
 
   @Override
@@ -353,6 +399,64 @@ public final class DefaultLocalizer implements Localizer {
   /** What the IMU said about trusting the wheels this loop. */
   public DriveConditions conditions() {
     return conditions;
+  }
+
+  // ---- What its estimator has learned, for the log ----
+
+  /** The gyro's scale error as the estimator has learned it, in percent ({@link PoseEstimator}). */
+  public double gyroScalePercent() {
+    return estimator.gyroScalePercent();
+  }
+
+  /** The gyro's steady drift as the estimator has learned it, in degrees a minute. */
+  public double gyroDriftDegreesPerMinute() {
+    return estimator.gyroDriftDegreesPerMinute();
+  }
+
+  /**
+   * Whether the heading is a person's word no camera has backed yet, a placement's or a driver's
+   * reset: no image is solved by it.
+   */
+  public boolean headingInDoubt() {
+    return estimator.headingInDoubt();
+  }
+
+  /** Whose word the heading rests on while no camera has backed it; {@code NONE} once one has. */
+  public HeadingDoubt headingDoubt() {
+    return estimator.headingDoubt();
+  }
+
+  /** How many times the drive team has reset the heading. */
+  public int headingResets() {
+    return estimator.headingResets();
+  }
+
+  /** What the estimate's latest recovery did, and on what evidence; empty before the first. */
+  public Optional<Recovered> lastRecovery() {
+    return estimator.lastRecovery();
+  }
+
+  /** Where the wheels and the IMU alone put the robot since it was last placed. */
+  public OdometryOnly odometryOnly() {
+    return estimator.odometryOnly();
+  }
+
+  /** How far the estimator takes a camera to be turned on its mount, in degrees. */
+  public double cameraTurnDegrees(String camera) {
+    return estimator.cameraTurnDegrees(camera);
+  }
+
+  /** How late the estimator's watch takes a camera's images to be stamped, in seconds. */
+  public double cameraLateSeconds(String camera) {
+    return estimator.cameraLateSeconds(camera);
+  }
+
+  /**
+   * How far the estimator's watch has a camera's measurements in doubt, in meters: how far they
+   * keep landing to one side of the other cameras', which widens them.
+   */
+  public double cameraWatchDoubtMeters(String camera) {
+    return estimator.cameraDoubtMeters(camera);
   }
 
   /** How far the wheels are trusted this loop, and why. */
@@ -424,7 +528,7 @@ public final class DefaultLocalizer implements Localizer {
     double reach = Math.min(MAX_GROUND_REACH_METERS, wheelReach + estimateMayBeOffBy);
     return ground
         .under(pose().getTranslation(), reach)
-        .map(surface -> Math.min(tilt, surface.steepestSlopeRadians() + GROUND_SLOPE_MARGIN))
+        .map(surface -> Math.min(tilt, surface.steepestSlopeRadians() + groundSlopeMargin))
         .orElse(0.0);
   }
 }

@@ -62,8 +62,9 @@ public final class ImuCrossCheck {
     /**
      * Over a second, within 3° and 5% of the turn: a gyro and an IMU whose scales differ a little.
      */
-    public static final Settings DEFAULTS =
-        builder().windowSeconds(1.0).toleranceDegrees(3).scaleTolerance(0.05).build();
+    public static Settings defaults() {
+      return builder().windowSeconds(1.0).toleranceDegrees(3).scaleTolerance(0.05).build();
+    }
 
     public Settings {
       Checks.on(Settings.class)

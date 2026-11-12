@@ -1,45 +1,38 @@
 package com.michaelgrundvig.frc.localization;
 
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalDouble;
 import java.util.function.Predicate;
 import org.wpilib.math.geometry.Pose2d;
 import org.wpilib.math.geometry.Rotation2d;
 import org.wpilib.math.geometry.Translation2d;
-import org.wpilib.math.util.MathUtil;
 
 /**
  * Where the robot is: odometry, corrected by camera measurements, with the gyro owning heading.
  *
- * <p>The state is the robot's position, a heading offset, the gyro's two errors, its scale and its
- * drift, and each camera's turn on its mount: the field heading is the gyro's reading plus the
+ * <p>The state is the robot's position, a heading offset, the gyro's two errors (its scale and its
+ * drift), and each camera's turn on its mount. The field heading is the gyro's reading plus the
  * offset, so the gyro keeps all short-term authority over heading, and cameras correct what it gets
- * wrong, the share of every turn its scale misreads and what it drifts each second. Each camera's
+ * wrong: the share of every turn its scale misreads, and what it drifts each second. Each camera's
  * turn starts as unsure as its mount's tolerance and is learned from its images relative to the
- * other cameras' ({@link PoseFilter}); a camera whose headings turn at once, as a knocked one's do,
- * has its turn opened up and learned anew ({@link MountKnocks}). A covariance holds the uncertainty
- * of all of them and how they relate: an unsure heading makes every meter driven add position
- * uncertainty sideways, an unsure scale makes every turn add heading uncertainty, and an unsure
- * drift every second.
+ * other cameras' ({@link PoseFilter}). A camera whose headings turn at once, as a knocked one's do,
+ * has its turn opened up and learned anew ({@link CameraMounts}). A covariance holds the
+ * uncertainty of all of them and how they relate: an unsure heading makes every meter driven add
+ * position uncertainty sideways, an unsure scale makes every turn add heading uncertainty, and an
+ * unsure drift every second.
  *
- * <p><b>Odometry.</b> Each odometry step predicts: the wheels' motion, along the arc the gyro
- * turned through, moves the position, and the uncertainty grows with the distance driven, the
- * turning, and time, and with whatever makes the wheels suspect ({@link WheelDoubt}).
+ * <p><b>Odometry.</b> Each odometry step predicts ({@link OdometryPrediction}): the wheels' motion,
+ * along the arc the gyro turned through, moves the position, and the uncertainty grows with the
+ * distance driven, the turning, and time, and with whatever makes the wheels suspect ({@link
+ * WheelDoubt}).
  *
  * <p><b>Cameras.</b> A camera measurement is applied at the moment its image was taken, however
- * late it arrives. The estimator keeps {@link EstimatorConfig#historySeconds} of steps, rewinds to
- * the measurement, applies it, and replays the steps since ({@link #replay}), so measurements give
- * the same result in any order of arrival. Each is gated against the estimate first, and again
- * whenever a replay applies it anew: one that a later-arriving, earlier image rules out is taken
- * back, as it would have been rejected had the two come in order.
+ * late it arrives ({@link VisionReplay}). Each is gated against the estimate first ({@link
+ * VisionGate}), and again whenever a replay applies it anew: one that a later-arriving, earlier
+ * image rules out is taken back, as it would have been rejected had the two come in order. What a
+ * camera is known to miss by is taken off first ({@link CameraMissCorrection}).
  *
  * <p><b>Recovery.</b> When several rejected measurements agree with each other, for reasons
  * independent of each other, odometry was the one that was wrong (a collision, a spin), and the
@@ -47,8 +40,7 @@ import org.wpilib.math.util.MathUtil;
  * camera and a sign from the other sensors that the robot may have been moved unseen ({@link
  * MotionEvidence}): one camera repeating one tag's answer is one source, and a misread tag repeats
  * itself as faithfully as a shove would. It recovers to their heading first, if that is what they
- * agree is wrong (a bad heading reset, a robot placed backwards), since every position worked out
- * with a wrong heading is wrong too.
+ * agree is wrong, since every position worked out with a wrong heading is wrong too.
  *
  * <p><b>Honesty.</b> Its uncertainty is meant to be honest, since gates, χ² tests, and any bound on
  * the error trust it: the error should go past 3.72 times the spread it claims no more than once in
@@ -57,78 +49,33 @@ import org.wpilib.math.util.MathUtil;
  * and how). Each camera is told apart by its name, and each tag by its number ({@link
  * ErrorPlaces}).
  *
- * <p>Its parts: {@link OdometryHistory} keeps the steps, {@link PoseFilter} does the filter's math,
- * {@link WheelDoubt} says how far each step's wheels are doubted, {@link ErrorPlaces} tells cameras
- * and tags apart, and {@link Recovery} judges when the cameras agree against odometry. This class
- * feeds them and keeps the books.
- *
- * <p>Pure logic: no clock, no hardware, no static state. Every input comes in through a method,
- * stamped with its capture time, so a replay reproduces every decision. Use it from one thread.
+ * <p>This class feeds its parts and keeps the books ({@link MeasurementBooks}). It is pure logic:
+ * no clock, no hardware, no static state. Every input comes in through a method, stamped with its
+ * capture time, so a replay reproduces every decision. Use it from one thread.
  */
 public final class PoseEstimator {
   /** The robot's velocity is taken over the odometry steps of this last stretch of time. */
   private static final long VELOCITY_WINDOW_NANOS = 100_000_000L;
 
-  /** The history has room for its seconds of odometry at up to this many steps a second. */
-  private static final int MOST_STEPS_PER_SECOND = 1000;
-
-  /**
-   * And starts with room for this many, growing only if odometry runs faster: a robot's odometry
-   * runs at 250 steps a second, and a quarter more leaves room for a loop that brings a step or two
-   * more than its share.
-   */
-  private static final int USUAL_STEPS_PER_SECOND = 313;
-
-  private static final int FEWEST_STEPS_KEPT = 16;
-
-  private static final double RADIANS_PER_TURN = 2 * Math.PI;
   private static final double SECONDS_PER_MINUTE = 60;
   private static final double PERCENT = 100;
 
-  /** How long a match lasts, in seconds: 2 minutes 30 seconds. */
-  private static final double MATCH_SECONDS = 150;
-
   private final EstimatorConfig config;
-  private final Predicate<Translation2d> onField;
-
-  // How fast the uncertainty grows as the robot drives, from the configuration. Each is a variance
-  // for one unit of what grows it: a meter driven, a radian turned, a second passed.
-  private final double positionVariancePerMeter;
-  private final double positionVariancePerRadian;
-  private final double headingVariancePerSecond;
-
-  /** The heading variance a radian of turning adds when an IMU turned the step. */
-  private final double imuHeadingVariancePerRadian;
-
-  /** And when the wheels turned it, which drift far faster. */
-  private final double wheelHeadingVariancePerRadian;
-
-  /**
-   * How unsure each camera's turn on its mount starts, by its place, as a variance in radians
-   * squared: from its mount's tolerance. A sign that it was knocked opens its turn up by at least
-   * this again.
-   */
-  private final double[] cameraTurnVariance = new double[ConsideredErrors.MAX_CAMERAS];
-
-  /**
-   * How unsure each camera's shift on its mount is, by its place, along each axis, before any doubt
-   * about its mount: from its mount's tolerance and what its solves repeat beyond it.
-   */
-  private final double[] cameraShiftVariance = new double[ConsideredErrors.MAX_CAMERAS];
 
   private final long historyNanos;
   private final long futureToleranceNanos;
   private final long visionTimeoutNanos;
   private final long disagreementWindowNanos;
 
-  /** A camera's own heading within this of the estimate's backs a driver's heading reset. */
-  private final double headingAgreementRadians;
-
   private final OdometryHistory history;
   private final PoseFilter filter;
+  private final OdometryPrediction prediction;
   private final WheelDoubt wheelDoubt;
   private final ErrorPlaces places;
-  private final Recovery recovery;
+  private final CameraMissCorrection corrections;
+  private final CameraMounts mounts;
+  private final VisionReplay replay;
+  private final VisionUpdate vision;
 
   /** What besides the cameras says the robot may have been moved unseen. */
   private final MotionEvidence motionEvidence = new MotionEvidence();
@@ -136,132 +83,25 @@ public final class PoseEstimator {
   /** Reads the gyro's drift off each stretch of standing still. */
   private final GyroAtRest gyroAtRest;
 
-  // The IMUs' readings, unwrapped into one continuous yaw.
+  /** Where the wheels and the IMU alone put the robot since it was last placed. */
+  private final OdometryOnly odometryOnly;
+
+  /** The IMUs' readings, unwrapped into one continuous yaw. */
+  private final ContinuousYaw yaw = new ContinuousYaw();
 
   /** Whether the first odometry step has come: nothing can be estimated before it. */
   private boolean started;
 
-  /** The continuous yaw as of the newest step, in radians: it never wraps. */
-  private double yaw;
-
-  /** The last reading an IMU gave, as it gave it: the next reading's turn is measured from it. */
-  private double lastImuYaw;
-
-  /** What read the yaw at the newest step: an IMU, or the wheels when none did. */
-  private YawSource lastSource = YawSource.WHEELS;
-
-  // Where the robot was told it is.
-
   /** Where the robot is taken to be when odometry starts: as constructed, or as last reset. */
   private PoseReset initial;
 
-  /** Whether the robot has been placed: told where it is, or found by a camera. */
-  private boolean placed;
-
-  /** Measurements taken at or before this moment are from before the estimate was last reset. */
-  private long lastResetNanos = Long.MIN_VALUE;
-
-  /**
-   * Whether the heading is a driver's reset that no camera has backed yet. A camera backs it when
-   * its own heading agrees with it, or when the cameras' headings turn the estimate. Until then a
-   * position solved with that heading cannot vote to move the estimate: if the heading is wrong, it
-   * puts every such position off alike, and they agree with each other.
-   */
-  private boolean headingInDoubt;
-
-  // The cameras.
-
-  /** The measurements added since the last update. */
-  private final List<VisionMeasurement> pending = new ArrayList<>();
-
-  /** The measurements the history has applied and still reaches back to, in time order. */
-  private final List<AppliedMeasurement> applied = new ArrayList<>();
-
-  /** Each camera's doubt about its mount, as last told, for the next update to apply. */
-  private final Map<String, MountDoubt> mountDoubts = new HashMap<>();
-
-  /** Whether each camera's measurements keep landing to one side of the others'. */
-  private final CameraWatch watch;
-
-  /** Whether a camera's mount may have been knocked, so its turn must be learned anew. */
-  private final MountKnocks knocks;
-
-  /**
-   * How far this update found each camera's turn must be opened up, by a sign of a knock, as the
-   * variance to add to it, by the camera's place: zero for none.
-   */
-  private final double[] turnsToReopen = new double[ConsideredErrors.MAX_CAMERAS];
-
-  /**
-   * Where odometry alone puts the robot at the moment of the measurement being applied: the
-   * estimate as it stood at the start of the history, carried on by the wheels and the gyro. Set by
-   * the replay for each measurement, in fields so that none is made for it.
-   */
-  private double odometryAloneX;
-
-  private double odometryAloneY;
-
-  /** How unsure that place is, as a variance along each axis: what the steps since have added. */
-  private double odometryAloneVariance;
-
-  /**
-   * How the robot was moving at that moment, by odometry: its velocity over the field in meters a
-   * second, and how fast it was turning in radians a second. An image stamped a little late is off
-   * by these times the lateness ({@link CameraWatch#lateArmX}).
-   */
-  private double velocityXThen;
-
-  private double velocityYThen;
-  private double yawRateThen;
-
-  // The books, for the estimate's mode and health.
-
-  /** How far each recently accepted measurement was from the estimate. */
-  private final List<Agreement> agreements = new ArrayList<>();
-
-  private long lastAcceptedNanos = Long.MIN_VALUE;
-  private int consecutiveRejections;
-  private int acceptedCount;
-  private int rejectedCount;
-  private int recoveries;
-  private double lastInnovationMeters = Double.NaN;
-
-  /**
-   * A camera's measurement and the moment the history applies it at.
-   *
-   * @param time when it is applied: its capture time, or the newest step's time if it was stamped a
-   *     little after that
-   */
-  private record AppliedMeasurement(long time, VisionMeasurement measurement) {}
-
-  /**
-   * A measurement to apply during a replay.
-   *
-   * @param newThisUpdate whether it arrived this update, or was applied before and is being applied
-   *     again. Both are gated against the estimate as the replay has it. One applied before that an
-   *     earlier image, new this update, now rules out is taken back, as it would have been rejected
-   *     had the two come in order.
-   */
-  private record ReplayedMeasurement(AppliedMeasurement applied, boolean newThisUpdate) {
-    long time() {
-      return applied.time();
-    }
-  }
-
-  /** How far an accepted measurement was from the estimate, for the health's disagreement. */
-  private record Agreement(long time, double meters) {}
+  /** How many times the drive team has reset the heading. */
+  private int headingResets;
 
   /**
    * An estimator that takes each camera, as it first gives a measurement, to sit as a mount
-   * measured from CAD and checked does ({@link CameraConfig.MountTolerance#MEASURED}).
-   *
-   * @param config how to weigh the sources
-   * @param onField whether a point is on the field: measurements off it are rejected
-   * @param tags the field's tags: each one's placement is kept apart, the same for every camera
-   *     that sees it and every time it's seen. A measurement from any other counts its placement as
-   *     new in each image ({@link #tagsWithoutPlaces})
-   * @param initial where the robot is at the start, and how sure that is; for a placeholder (the
-   *     robot not placed yet) give a large uncertainty, and the first camera measurement wins
+   * measured from CAD and checked does ({@link CameraConfig.MountTolerance#MEASURED}). The
+   * parameters are as for the constructor that names the cameras.
    */
   public PoseEstimator(
       EstimatorConfig config,
@@ -289,120 +129,53 @@ public final class PoseEstimator {
       Collection<Integer> tags,
       List<CameraConfig> cameras,
       PoseReset initial) {
+    this(config, HeadingCorrection.EVERY_FIX, onField, tags, cameras, initial);
+  }
+
+  /**
+   * An estimator that corrects the heading another way than the default localizer does: for the
+   * consistency study, which compares them.
+   *
+   * @param heading what corrects the heading beside the gyro
+   */
+  public PoseEstimator(
+      EstimatorConfig config,
+      HeadingCorrection heading,
+      Predicate<Translation2d> onField,
+      Collection<Integer> tags,
+      List<CameraConfig> cameras,
+      PoseReset initial) {
     this.config = config;
-    this.onField = onField;
     this.initial = initial;
-    positionVariancePerMeter = square(config.translationStdDevPerMeter());
-    positionVariancePerRadian = square(config.translationStdDevPerRadian());
-    headingVariancePerSecond =
-        square(Math.toRadians(config.headingDriftDegreesPerMinute())) / SECONDS_PER_MINUTE;
-    imuHeadingVariancePerRadian =
-        square(Math.toRadians(config.headingNoiseDegreesPerTurn())) / RADIANS_PER_TURN;
-    CameraConfig.MountTolerance measured = CameraConfig.MountTolerance.MEASURED;
-    Arrays.fill(cameraTurnVariance, square(measured.turnStdDevRadians()));
-    Arrays.fill(cameraShiftVariance, shiftVariance(config, measured));
-    wheelHeadingVariancePerRadian =
-        square(Math.toRadians(config.wheelHeadingStdDevDegreesPerTurn())) / RADIANS_PER_TURN;
+    odometryOnly = new OdometryOnly(initial.pose());
     historyNanos = Timestamps.fromSeconds(config.historySeconds());
     futureToleranceNanos = Timestamps.fromSeconds(config.futureToleranceSeconds());
     visionTimeoutNanos = Timestamps.fromSeconds(config.visionTimeoutSeconds());
     disagreementWindowNanos = Timestamps.fromSeconds(config.disagreementWindowSeconds());
-    headingAgreementRadians = Math.toRadians(config.recoveryAgreementDegrees());
     wheelDoubt = new WheelDoubt(config);
     places = new ErrorPlaces(tags);
-    recovery = new Recovery(config);
-    knocks = new MountKnocks(config.cameraWatchMeasurements());
     gyroAtRest =
         new GyroAtRest(
-            headingVariancePerSecond,
+            OdometryPrediction.headingVariancePerSecond(config),
             Math.toRadians(config.gyroDriftStdDevDegreesPerMinute()) / SECONDS_PER_MINUTE);
-    watch =
-        new CameraWatch(
-            config.cameraWatchMeasurements(),
-            measured.turnStdDevRadians(),
-            Math.sqrt(shiftVariance(config, measured)),
-            config.cameraClockStdDevSeconds());
-    filter =
-        new PoseFilter(
-            new PoseFilter.Considered(
-                Math.toRadians(config.headingStdDevDegreesPerTurn()) / RADIANS_PER_TURN,
-                Math.toRadians(config.backupHeadingStdDevDegreesPerTurn()) / RADIANS_PER_TURN,
-                measured.turnStdDevRadians(),
-                Math.sqrt(shiftVariance(config, measured)),
-                Math.toRadians(config.cameraShiftStdDevDegrees()),
-                config.tagPlacementStdDevMeters(),
-                config.cameraShiftCorrelationMeters(),
-                Math.toRadians(config.cameraShiftCorrelationDegrees())),
-            places.tagCount(),
-            config.headingCorrection() == EstimatorConfig.HeadingCorrection.EVERY_FIX,
-            config.gyroErrors() == EstimatorConfig.GyroErrors.ESTIMATED
-                ? PoseFilter.GyroErrors.ESTIMATED
-                : PoseFilter.GyroErrors.CONSIDERED,
-            gyroDoubt(config),
-            measured.turnStdDevRadians() / Math.sqrt(MATCH_SECONDS));
-    int mostSteps = (int) Math.ceil(config.historySeconds() * MOST_STEPS_PER_SECOND) + 1;
-    int usualSteps = (int) Math.ceil(config.historySeconds() * USUAL_STEPS_PER_SECOND) + 1;
-    history =
-        new OdometryHistory(
-            Math.max(FEWEST_STEPS_KEPT, usualSteps),
-            Math.max(FEWEST_STEPS_KEPT, mostSteps),
-            filter.uncertaintyLength());
+    filter = EstimatorParts.filter(config, heading, places.tagCount());
+    history = EstimatorParts.history(config, filter);
+    prediction = new OdometryPrediction(config, history, filter);
+    corrections = new CameraMissCorrection(EstimatorParts.watch(config));
+    mounts = new CameraMounts(config, heading, places, filter, history, corrections);
+    replay = new VisionReplay(config, history, filter, prediction, mounts);
+    vision =
+        new VisionUpdate(
+            config,
+            onField,
+            new VisionUpdate.Parts(
+                filter, history, places, corrections, mounts, replay, wheelDoubt, motionEvidence));
     for (CameraConfig camera : cameras) {
-      startMount(camera.name(), camera.mountTolerance());
+      mounts.mount(camera.name(), camera.mountTolerance());
     }
     filter.cameraCount(places.placedCameraCount());
-    filter.set(initial, yaw);
+    filter.set(initial, yaw.radians());
   }
-
-  /**
-   * Gives a camera its place, and starts its mount as unsure as its tolerance says.
-   *
-   * <p>The turn starts with the variance of a turn drawn evenly within the tolerance. It may then
-   * wander, as a mount settles under a match's driving and contact, by as much again over a match:
-   * so after two and a half minutes without a word from the camera, its turn is as unsure as when
-   * it was mounted. Its shift adds the tolerance's offset to what the camera's solves repeat beyond
-   * its mount ({@link EstimatorConfig#cameraShiftStdDevMeters}).
-   */
-  private void startMount(String name, CameraConfig.MountTolerance tolerance) {
-    int camera = places.cameraPlace(name);
-    if (!ConsideredErrors.hasPlace(camera)) {
-      return;
-    }
-    cameraTurnVariance[camera] = square(tolerance.turnStdDevRadians());
-    cameraShiftVariance[camera] = shiftVariance(config, tolerance);
-    filter.setCameraMount(
-        camera,
-        cameraTurnVariance[camera],
-        cameraTurnVariance[camera] / MATCH_SECONDS,
-        cameraShiftVariance[camera]);
-  }
-
-  /** How unsure a camera's shift is along each axis: its mount's offset, and its solves' beyond. */
-  private static double shiftVariance(EstimatorConfig config, CameraConfig.MountTolerance mount) {
-    return square(mount.offsetStdDevMeters()) + square(config.cameraShiftStdDevMeters());
-  }
-
-  /**
-   * The configuration's doubts about the gyro in the filter's units. A wander "per minute" is how
-   * far the value may have moved after a minute, and its variance grows with time, so after one
-   * second it is that over the square root of 60.
-   */
-  private static PoseFilter.GyroDoubt gyroDoubt(EstimatorConfig config) {
-    double sqrtSecondsPerMinute = Math.sqrt(SECONDS_PER_MINUTE);
-    double driftRadiansPerSecond =
-        Math.toRadians(config.gyroDriftStdDevDegreesPerMinute()) / SECONDS_PER_MINUTE;
-    double scaleWander = config.gyroScaleWanderPercentPerMinute() / PERCENT / sqrtSecondsPerMinute;
-    double driftWanderRadiansPerSecond =
-        Math.toRadians(config.gyroDriftWanderDegreesPerMinute())
-            / SECONDS_PER_MINUTE
-            / sqrtSecondsPerMinute;
-    return new PoseFilter.GyroDoubt(
-        driftRadiansPerSecond, scaleWander, driftWanderRadiansPerSecond);
-  }
-
-  // ---------------------------------------------------------------------------------------------
-  // Odometry.
-  // ---------------------------------------------------------------------------------------------
 
   /**
    * One odometry step: how the robot moved since the previous step, ending at this time, and what
@@ -421,7 +194,7 @@ public final class PoseEstimator {
    */
   public void addOdometry(
       long timestampNanos, BodyMotion motion, double yawRadians, YawSource source) {
-    YawSource readBy = whatReadTheYaw(source, yawRadians);
+    YawSource readBy = ContinuousYaw.readerOf(source, yawRadians);
     if (!started) {
       start(timestampNanos, readBy, yawRadians);
       return;
@@ -430,25 +203,22 @@ public final class PoseEstimator {
     if (timestampNanos <= previousTime) {
       return;
     }
-    YawSource turnedBy = whatTurnsTheStep(readBy);
+    YawSource turnedBy = yaw.turnerOf(readBy);
     double stepSeconds = Timestamps.toSeconds(timestampNanos - previousTime);
     double driftSeen = Double.NaN;
     if (turnedBy == YawSource.WHEELS) {
-      yaw += motion.dthetaRadians();
+      yaw.turnByWheels(motion.dthetaRadians());
       gyroAtRest.clear();
     } else {
-      double imuTurn = MathUtil.angleModulus(yawRadians - lastImuYaw);
-      yaw += imuTurn;
+      double imuTurn = yaw.turnByImu(yawRadians);
       if (turnedBy == YawSource.GYRO) {
         driftSeen = gyroAtRest.step(stepSeconds, motion, imuTurn);
       } else {
         gyroAtRest.clear();
       }
     }
-    if (readBy != YawSource.WHEELS) {
-      lastImuYaw = yawRadians;
-    }
-    lastSource = readBy;
+    odometryOnly.step(motion, yaw.radians());
+    yaw.read(readBy, yawRadians);
 
     double shareThatCounts = wheelDoubt.shareOfTravelThatCounts();
     double shareAcrossTheField = wheelDoubt.shareOfTravelAcrossTheField();
@@ -466,50 +236,28 @@ public final class PoseEstimator {
             motion.residualMeters(),
             addedVariance,
             turnedBy,
-            yaw);
+            yaw.radians());
     if (!Double.isNaN(driftSeen)) {
       history.sawDriftOverNewestStep(driftSeen, gyroAtRest.variance());
     }
     double xBefore = filter.x();
     double yBefore = filter.y();
-    predictThrough(step, 0, 1);
+    prediction.predict(step, 0, 1);
     history.movedOverNewestStep(
-        filter.x() - xBefore, filter.y() - yBefore, positionVarianceOf(step));
-    learnTheDriftSeenOver(step);
+        filter.x() - xBefore, filter.y() - yBefore, prediction.positionVarianceOf(step));
+    prediction.learnDrift(step);
     history.store(step, filter);
-    dropWhatTheHistoryNoLongerReaches();
-  }
-
-  /** What read the yaw: the IMU named, or the wheels if none was or its reading isn't a number. */
-  private static YawSource whatReadTheYaw(YawSource source, double yawRadians) {
-    if (source == YawSource.WHEELS || !Double.isFinite(yawRadians)) {
-      return YawSource.WHEELS;
-    }
-    return source;
-  }
-
-  /**
-   * What turns a step: the IMU that read its yaw, if the same IMU read the step before too, so the
-   * difference between the two readings is a turn. Otherwise the wheels' own turning stands in.
-   */
-  private YawSource whatTurnsTheStep(YawSource readBy) {
-    boolean sameImuReadTheStepBefore = readBy != YawSource.WHEELS && readBy == lastSource;
-    if (sameImuReadTheStepBefore) {
-      return readBy;
-    }
-    return YawSource.WHEELS;
+    pruneHistory();
   }
 
   /** The first odometry step: the history starts at it, with the filter where the robot was put. */
   private void start(long timestampNanos, YawSource readBy, double yawRadians) {
     started = true;
-    yaw = readBy == YawSource.WHEELS ? 0 : yawRadians;
-    lastImuYaw = yaw;
-    lastSource = readBy;
-    history.start(timestampNanos, readBy, yaw);
-    filter.set(initial, yaw);
-    history.store(OdometryHistory.OLDEST_STEP, filter);
-    lastResetNanos = timestampNanos;
+    yaw.start(readBy, yawRadians);
+    history.start(timestampNanos, readBy, yaw.radians());
+    filter.set(initial, yaw.radians());
+    odometryOnly.place(initial.pose(), yaw.radians());
+    replay.startedHere();
   }
 
   /**
@@ -530,136 +278,66 @@ public final class PoseEstimator {
         conditions, wheelDoubt.shareOfTravelThatCounts(), history.newestTime());
   }
 
-  /**
-   * The filter's prediction through part of a step in the history: from one fraction of the way
-   * through it to another. A whole step is from 0 to 1. A replay predicts up to each measurement
-   * that falls inside a step, applies it, and carries on from there.
-   *
-   * <p>The step's travel, turn and added uncertainty are shared out evenly over it, so each part
-   * takes its fraction of them. The uncertainty a whole step adds is:
-   *
-   * <ul>
-   *   <li>to the position, a variance for each meter driven and each radian turned, plus the step's
-   *       own added variance for slip, tilt and collisions;
-   *   <li>to the heading, a variance for each second passed (the gyro's drift) and for each radian
-   *       turned (the noise of whatever turned the step).
-   * </ul>
-   *
-   * <p>The filter itself adds what the gyro's scale and drift may have wandered over the time.
-   */
-  private void predictThrough(int step, double fromFraction, double toFraction) {
-    double fraction = toFraction - fromFraction;
-    if (fraction <= 0) {
-      return;
-    }
-    double stepTurn = history.turnOver(step);
-    double stepForward = history.travelForward(step);
-    double stepLeft = history.travelLeft(step);
-    double stepSeconds = Timestamps.toSeconds(history.durationNanos(step));
-    YawSource turnedBy = history.turnedBy(step);
-
-    double stepPositionVariance = positionVarianceOf(step);
-    double headingVariancePerRadian =
-        turnedBy == YawSource.WHEELS ? wheelHeadingVariancePerRadian : imuHeadingVariancePerRadian;
-    double stepHeadingVariance =
-        headingVariancePerSecond * stepSeconds + headingVariancePerRadian * Math.abs(stepTurn);
-
-    filter.predict(
-        history.yawAfter(step - 1) + fromFraction * stepTurn,
-        fraction * stepTurn,
-        fraction * stepForward,
-        fraction * stepLeft,
-        fraction * stepSeconds,
-        fraction * stepPositionVariance,
-        fraction * stepHeadingVariance,
-        turnedBy);
-  }
-
-  /**
-   * The position variance a whole step adds: a variance for each meter driven and each radian
-   * turned, plus the step's own added variance for slip, tilt and collisions.
-   */
-  private double positionVarianceOf(int step) {
-    double distance = Math.hypot(history.travelForward(step), history.travelLeft(step));
-    return positionVariancePerMeter * distance
-        + positionVariancePerRadian * Math.abs(history.turnOver(step))
-        + history.addedPositionVariance(step);
-  }
-
-  /**
-   * Where a stretch of standing still ended with this step, corrects the gyro's drift by what the
-   * stretch read of it ({@link GyroAtRest}). It runs as each step ends, the first time and in every
-   * replay, so a replay comes to the same drift.
-   */
-  private void learnTheDriftSeenOver(int step) {
-    double driftSeen = history.driftSeenAtRest(step);
-    boolean aStretchEndedHere = !Double.isNaN(driftSeen);
-    if (aStretchEndedHere) {
-      filter.sawGyroDrift(driftSeen, history.driftSeenVariance(step));
-    }
-  }
-
   /** Drops steps older than the history keeps, and the measurements at or before its new start. */
-  private void dropWhatTheHistoryNoLongerReaches() {
+  private void pruneHistory() {
     history.dropStepsNotNeededSince(history.newestTime() - historyNanos);
-    long oldestTime = history.oldestTime();
-    applied.removeIf(done -> done.time() <= oldestTime);
+    replay.forgetAtOrBefore(history.oldestTime());
   }
-
-  // ---------------------------------------------------------------------------------------------
-  // What the estimator is told.
-  // ---------------------------------------------------------------------------------------------
 
   /** A camera measurement, to apply at the next {@link #update}. */
   public void addVision(VisionMeasurement measurement) {
-    pending.add(measurement);
+    vision.add(measurement);
   }
 
   /**
    * A camera's doubt about its mount ({@link MountCheck}), as of now. With {@link
-   * EstimatorConfig.HeadingCorrection#HEADING_MEASUREMENTS_AND_MOUNT_DOUBT}, the next {@link
-   * #update} adds it to what the camera repeats in every image: the doubt to its shift, and the
-   * doubt over its tags' distance to its turn. Otherwise it's ignored here (the vision pipeline
-   * widens each image by it either way).
+   * HeadingCorrection#HEADING_MEASUREMENTS_AND_MOUNT_DOUBT}, the next {@link #update} adds it to
+   * what the camera repeats in every image: the doubt to its shift, and the doubt over its tags'
+   * distance to its turn. Otherwise it's ignored here (the vision pipeline widens each image by it
+   * either way).
    *
-   * <p>A doubt that comes after the camera's fixes counted is taken as new from then on: what the
+   * <p>A doubt that comes after the camera's fixes counted is taken as new from then on. What the
    * estimate already took from them stays as sure as it was, and what's left of the doubt holds the
-   * camera's later fixes off. Since the mount check judges over its latest few hundred tags, the
-   * doubt always comes a little after the knock.
+   * camera's later fixes off. The mount check judges over its latest few hundred tags, so the doubt
+   * always comes a little after the knock.
    *
    * @param doubtMeters how far its measurements may be off from where its mount moved
    * @param distanceMeters how far its tags were, on average, when that was judged; NaN until then
    */
   public void mountDoubt(String camera, double doubtMeters, double distanceMeters) {
-    boolean mountDoubtIsConsidered =
-        config.headingCorrection()
-            == EstimatorConfig.HeadingCorrection.HEADING_MEASUREMENTS_AND_MOUNT_DOUBT;
-    if (mountDoubtIsConsidered) {
-      mountDoubts.put(camera, new MountDoubt(doubtMeters, distanceMeters));
-    }
+    mounts.doubt(camera, doubtMeters, distanceMeters);
   }
 
   /**
    * Tells the estimator where the robot is, now: placed on its start, or a driver's "against the
    * wall here". History before it is dropped. A reset with no heading (infinite heading variance)
    * keeps the heading as it was.
+   *
+   * <p>The heading it gives is a person's word, as a driver's heading reset is: a robot set down
+   * crooked, or backwards, on its start believes the start's heading all the same. So it is in
+   * doubt until a camera backs it ({@link #headingDoubt}), and no image is solved with it
+   * meanwhile.
    */
   public void reset(PoseReset reset) {
-    placed = true;
-    motionEvidence.placed();
-    if (reset.covariance().hasHeading()) {
-      headingInDoubt = false;
-    }
-    recovery.clear();
-    consecutiveRejections = 0;
+    vision.placed(reset);
     wheelDoubt.forgetSuspectTravel();
+    placeOdometryOnly(reset);
     if (!started) {
       initial = reset;
-      filter.set(reset, yaw);
+      filter.set(reset, yaw.radians());
       return;
     }
-    filter.set(reset, yaw);
-    startHistoryHere();
+    filter.set(reset, yaw.radians());
+    vision.restartHistory();
+  }
+
+  /** The odometry-only pose starts again where the robot was placed: its heading too, if given. */
+  private void placeOdometryOnly(PoseReset reset) {
+    double heading = odometryOnly.headingRadians();
+    odometryOnly.place(reset.pose(), yaw.radians());
+    if (!reset.covariance().hasHeading()) {
+      odometryOnly.face(heading);
+    }
   }
 
   /**
@@ -667,20 +345,20 @@ public final class PoseEstimator {
    * straight downfield" when the heading has gone wrong. History before it is dropped.
    *
    * <p>The driver may be wrong: facing elsewhere, or pressing at the wrong moment. Until a camera's
-   * own heading agrees with it (within {@link EstimatorConfig#recoveryAgreementDegrees}), a
-   * position solved with it can't vote to move the estimate, since a wrong heading puts every such
-   * position off alike; if the cameras' headings agree on another, the estimate turns to theirs.
+   * own heading agrees with it, a position solved with it can't vote to move the estimate, since a
+   * wrong heading puts every such position off alike. If the cameras' headings agree on another,
+   * the estimate turns to theirs.
    *
    * @param stdDevRadians how sure: how straight a driver lines the robot up by eye
    */
   public void resetHeading(Rotation2d heading, double stdDevRadians) {
-    if (!(stdDevRadians > 0) || Double.isInfinite(stdDevRadians)) {
+    boolean positive = stdDevRadians > 0;
+    if (!positive || Double.isInfinite(stdDevRadians)) {
       throw new IllegalArgumentException("a heading reset's uncertainty: " + stdDevRadians);
     }
-    headingInDoubt = true;
-    motionEvidence.placed();
-    recovery.clear();
-    consecutiveRejections = 0;
+    vision.headingReset();
+    headingResets++;
+    odometryOnly.face(heading.getRadians());
     double variance = square(stdDevRadians);
     if (!started) {
       PoseCovariance before = initial.covariance();
@@ -690,33 +368,41 @@ public final class PoseEstimator {
               new Pose2d(initial.pose().getTranslation(), heading),
               new PoseCovariance(before.xx(), before.xy(), before.yy(), variance),
               initial.reason());
-      filter.set(initial, yaw);
+      filter.set(initial, yaw.radians());
       return;
     }
-    filter.resetHeading(heading.getRadians() - yaw, variance);
-    startHistoryHere();
+    filter.resetHeading(heading.getRadians() - yaw.radians(), variance);
+    vision.restartHistory();
   }
 
   /**
-   * Whether the heading is a driver's reset no camera has backed yet ({@link #resetHeading}): an
-   * image solved with it would land off by its error, and could never back it.
+   * Whether the heading is a person's word no camera has backed yet: a placement's ({@link #reset})
+   * or a driver's reset ({@link #resetHeading}). An image solved with it would land off by its
+   * error, and could never back it.
    */
-  boolean headingInDoubt() {
-    return headingInDoubt;
+  public boolean headingInDoubt() {
+    return vision.headingDoubt() != HeadingDoubt.NONE;
   }
 
-  /** Drops the history: the newest step, with the filter as it is now, becomes its start. */
-  private void startHistoryHere() {
-    history.keepOnlyNewest();
-    history.store(OdometryHistory.OLDEST_STEP, filter);
-    applied.clear();
-    agreements.clear();
-    lastResetNanos = history.oldestTime();
+  /** Whose word the heading rests on while no camera has backed it; {@code NONE} once one has. */
+  public HeadingDoubt headingDoubt() {
+    return vision.headingDoubt();
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // The update: the loop's camera measurements.
-  // ---------------------------------------------------------------------------------------------
+  /** How many times the drive team has reset the heading ({@link #resetHeading}). */
+  public int headingResets() {
+    return headingResets;
+  }
+
+  /** What the latest recovery did, and on what evidence; empty before the first. */
+  public Optional<Recovered> lastRecovery() {
+    return vision.lastRecovery();
+  }
+
+  /** Where the wheels and the IMU alone put the robot since it was last placed. */
+  public OdometryOnly odometryOnly() {
+    return odometryOnly;
+  }
 
   /**
    * Applies the measurements added since the last update, each at its capture time, and decides
@@ -725,428 +411,11 @@ public final class PoseEstimator {
    *
    * @return what happened to each measurement, for the log
    */
-  public List<VisionDecision> update() {
-    List<VisionDecision> decisions = new ArrayList<>();
-    List<VisionMeasurement> usable = new ArrayList<>();
-    for (VisionMeasurement measurement : pending) {
-      Optional<Verdict> refusal = whyItCannotBeApplied(measurement);
-      if (refusal.isPresent()) {
-        rejectedCount++;
-        decisions.add(
-            new VisionDecision(measurement, refusal.get(), Double.NaN, Double.NaN, Double.NaN));
-      } else {
-        usable.add(measurement);
-      }
-    }
-    pending.clear();
-    if (!usable.isEmpty()) {
-      replay(usable, decisions);
-    }
-    reopenTheTurnsOfKnockedCameras();
-    recoverIfTheCamerasAgree();
-    applyMountDoubts();
-    if (started) {
-      long windowStart = history.newestTime() - disagreementWindowNanos;
-      agreements.removeIf(agreement -> agreement.time() < windowStart);
-    }
-    return decisions;
-  }
-
-  /**
-   * Why a measurement cannot be applied at all, before it is ever compared with the estimate: its
-   * image was taken at a moment the history does not reach, or it puts the robot off the field.
-   * Empty for a measurement that can be applied.
-   */
-  private Optional<Verdict> whyItCannotBeApplied(VisionMeasurement measurement) {
-    long taken = measurement.timestampNanos();
+  public List<MeasurementVerdict> update() {
     if (!started) {
-      return Optional.of(Verdict.BEFORE_ODOMETRY);
+      return vision.refuseAll(Verdict.BEFORE_ODOMETRY);
     }
-    if (taken <= lastResetNanos) {
-      return Optional.of(Verdict.BEFORE_RESET);
-    }
-    if (taken <= history.oldestTime()) {
-      return Optional.of(Verdict.STALE);
-    }
-    if (taken > history.newestTime() + futureToleranceNanos) {
-      return Optional.of(Verdict.FROM_THE_FUTURE);
-    }
-    if (!onField.test(measurement.pose().getTranslation())) {
-      return Optional.of(Verdict.OFF_FIELD);
-    }
-    return Optional.empty();
-  }
-
-  /**
-   * Rewinds to just before the earliest new measurement and replays the history from there,
-   * applying the new measurements and the ones applied before, in time order.
-   *
-   * <p>The filter is put back as it was after the last step before the earliest new measurement.
-   * Then each later step is predicted through again. A measurement that falls inside a step splits
-   * it: the filter predicts up to the measurement's moment, the measurement is gated and applied,
-   * and the prediction carries on from there. Each step's stored filter state is rewritten as the
-   * replay passes it.
-   */
-  private void replay(List<VisionMeasurement> usable, List<VisionDecision> decisions) {
-    long newestTime = history.newestTime();
-    long earliestNew = newestTime;
-    for (VisionMeasurement measurement : usable) {
-      earliestNew = Math.min(earliestNew, measurement.timestampNanos());
-    }
-    int startStep = history.lastStepBefore(earliestNew);
-    long startTime = history.endTime(startStep);
-
-    // Everything to apply after the starting step: what was applied there before, and what is new.
-    // A measurement stamped a little after the newest step is applied at the newest step.
-    List<ReplayedMeasurement> toApply = new ArrayList<>();
-    for (AppliedMeasurement done : applied) {
-      if (done.time() > startTime) {
-        toApply.add(new ReplayedMeasurement(done, false));
-      }
-    }
-    for (VisionMeasurement measurement : usable) {
-      long appliedAt = Math.min(measurement.timestampNanos(), newestTime);
-      toApply.add(new ReplayedMeasurement(new AppliedMeasurement(appliedAt, measurement), true));
-    }
-    toApply.sort(Comparator.comparingLong(ReplayedMeasurement::time));
-    // The replay adds back each one that passes the gate again.
-    applied.removeIf(done -> done.time() > startTime);
-
-    history.restore(startStep, filter);
-    int next = 0;
-    for (int step = startStep + 1; step < history.stepCount(); step++) {
-      long stepStart = history.endTime(step - 1);
-      long stepEnd = history.endTime(step);
-      double predictedUpTo = 0;
-      while (next < toApply.size() && toApply.get(next).time() <= stepEnd) {
-        ReplayedMeasurement replayed = toApply.get(next++);
-        double fraction = (double) (replayed.time() - stepStart) / (stepEnd - stepStart);
-        predictThrough(step, predictedUpTo, fraction);
-        predictedUpTo = fraction;
-        odometryAloneX = history.xByOdometryAlone(step, fraction);
-        odometryAloneY = history.yByOdometryAlone(step, fraction);
-        odometryAloneVariance = history.varianceByOdometryAlone(step);
-        velocityXThen = history.velocityX(step);
-        velocityYThen = history.velocityY(step);
-        yawRateThen = history.yawRate(step);
-        gateAndApply(replayed, history.yawPartWayThrough(step, fraction), decisions);
-      }
-      predictThrough(step, predictedUpTo, 1);
-      learnTheDriftSeenOver(step);
-      reopenTheTurnsReopenedAt(step);
-      history.store(step, filter);
-    }
-    // Anything left is at the starting step itself, which happens only when the history is a single
-    // step: there is no later step to split.
-    while (next < toApply.size()) {
-      odometryAloneX = filter.x();
-      odometryAloneY = filter.y();
-      odometryAloneVariance = 0;
-      velocityXThen = 0;
-      velocityYThen = 0;
-      yawRateThen = 0;
-      gateAndApply(toApply.get(next++), history.yawAfter(history.newestStep()), decisions);
-    }
-    history.store(history.newestStep(), filter);
-  }
-
-  /**
-   * Compares a camera measurement with the estimate as it was when its image was taken, gates it,
-   * and if it passes applies it as a Kalman update.
-   *
-   * @param yawThen the yaw when its image was taken
-   */
-  private void gateAndApply(
-      ReplayedMeasurement replayed, double yawThen, List<VisionDecision> decisions) {
-    VisionMeasurement measurement = replayed.applied().measurement();
-    int camera = places.cameraPlace(measurement.camera());
-    filter.cameraCount(places.placedCameraCount());
-    int[] tagPlaces = places.tagPlaces(measurement.tagIds());
-    double headingThen = yawThen + filter.headingOffset();
-    // A camera the watch has in doubt counts for less by that doubt, as more noise in each of its
-    // measurements: what is taken off them lags the camera's real miss as its tags change.
-    double doubt = watch.doubtMeters(camera);
-    double doubtVariance = doubt * doubt;
-    PoseFilter.Innovation innovation =
-        filter.innovation(measurement, yawThen, camera, tagPlaces, 0, 0, doubtVariance);
-    // Only a position solved with the gyro's heading is watched and corrected: the few
-    // measurements solved another way err another way.
-    boolean watched = !measurement.lever().equals(VisionMeasurement.Lever.NONE);
-    double knownMissX = 0;
-    double knownMissY = 0;
-    double lateArmX = 0;
-    double lateArmY = 0;
-    if (watched && innovation != null) {
-      // What the watch on the cameras takes this camera to put its measurements off by is taken
-      // off, where that brings the measurement nearer the estimate. Where it does not, this is not
-      // one of the images the camera's average miss is made of (a camera that misread a tag for a
-      // while reads the next one rightly), and the measurement stands as it came.
-      Translation2d toTags = measurement.lever().robotToTags();
-      lateArmX = CameraWatch.lateArmX(toTags.getY(), velocityXThen, yawRateThen);
-      lateArmY = CameraWatch.lateArmY(toTags.getX(), velocityYThen, yawRateThen);
-      double offX = watch.offX(camera, headingThen, lateArmX);
-      double offY = watch.offY(camera, headingThen, lateArmY);
-      double asItCame = Math.hypot(innovation.xMeters(), innovation.yMeters());
-      double withItTakenOff = Math.hypot(innovation.xMeters() - offX, innovation.yMeters() - offY);
-      if (withItTakenOff < asItCame) {
-        knownMissX = offX;
-        knownMissY = offY;
-        innovation =
-            filter.innovation(
-                measurement, yawThen, camera, tagPlaces, knownMissX, knownMissY, doubtVariance);
-      }
-    }
-    if (innovation == null) {
-      // It cannot be compared with the estimate at all, so it is left out. It is counted as a
-      // rejection and given a verdict of its own, new this update or applied before, so that no
-      // measurement leaves the estimator without one. It is not a camera disagreeing with the
-      // estimate, so it does not count toward the rejections in a row that mean the estimate is
-      // lost.
-      rejectedCount++;
-      decisions.add(
-          new VisionDecision(
-              measurement, Verdict.NOT_COMPARABLE, Double.NaN, Double.NaN, Double.NaN));
-      return;
-    }
-    if (!passesTheGate(replayed, innovation, decisions)) {
-      return;
-    }
-    if (watched && replayed.newThisUpdate()) {
-      // The watch is given the measurement's own miss, as it was before anything was taken off,
-      // from where odometry alone puts the robot: the innovation is the measurement, less what
-      // was taken off, less the estimate, so both are added back.
-      if (ConsideredErrors.hasPlace(camera)) {
-        watch.allowTurn(camera, square(filter.cameraTurnStdDev(camera)));
-      }
-      watch.accepted(
-          camera,
-          replayed.time(),
-          innovation.xMeters() + knownMissX + filter.x() - odometryAloneX,
-          innovation.yMeters() + knownMissY + filter.y() - odometryAloneY,
-          headingThen,
-          measurement.lever().robotToTags().getNorm(),
-          (measurement.covariance().xx() + measurement.covariance().yy()) / 2,
-          odometryAloneVariance,
-          lateArmX,
-          lateArmY);
-    }
-    filter.correct(innovation);
-    applied.add(replayed.applied());
-  }
-
-  /**
-   * Whether a camera measurement passes the gate, which is a chi-squared test: its innovation's
-   * squared distance from zero, measured in its own uncertainty, may not exceed the configured
-   * limit for a measurement of its kind (a position alone, or a pose). Keeps the books as it
-   * decides.
-   *
-   * <p>A measurement that was applied before and passes again was counted when it first passed, and
-   * changes nothing here. One applied before that now fails is taken back, and counted as a
-   * rejection like a new one.
-   */
-  private boolean passesTheGate(
-      ReplayedMeasurement replayed,
-      PoseFilter.Innovation innovation,
-      List<VisionDecision> decisions) {
-    double gate =
-        innovation.withHeading() ? config.gateChiSquaredPose() : config.gateChiSquaredPosition();
-    double chiSquared = innovation.chiSquared();
-    // Written so a chi-squared that isn't a number fails the gate instead of passing it.
-    boolean passes = chiSquared <= gate;
-    if (passes && !replayed.newThisUpdate()) {
-      return true;
-    }
-    lastInnovationMeters = innovation.distanceMeters();
-    boolean itsOwnHeadingAgrees =
-        innovation.withHeading()
-            && Math.abs(innovation.headingRadians()) <= headingAgreementRadians;
-    if (itsOwnHeadingAgrees) {
-      // A camera's own heading that agrees with a driver's reset backs it.
-      headingInDoubt = false;
-    }
-    VisionMeasurement measurement = replayed.applied().measurement();
-    if (!passes) {
-      noteRejection(replayed, innovation);
-      decisions.add(
-          new VisionDecision(
-              measurement, Verdict.GATED, innovation.distanceMeters(), chiSquared, gate));
-      return false;
-    }
-    watchForAKnock(places.cameraPlace(measurement.camera()), innovation);
-    noteAcceptance(replayed, innovation);
-    decisions.add(
-        new VisionDecision(
-            measurement, Verdict.ACCEPTED, innovation.distanceMeters(), chiSquared, gate));
-    return true;
-  }
-
-  /**
-   * Hands an accepted measurement's heading, if it has one of its own, to the watch for a knocked
-   * mount ({@link MountKnocks}). If the camera's headings now stand clear of where the estimate has
-   * them, its turn is opened up by its mount's tolerance and by how far its headings have turned.
-   */
-  private void watchForAKnock(int camera, PoseFilter.Innovation innovation) {
-    double headingsTurnedBy =
-        knocks.headingMissed(
-            camera, innovation.headingRadians(), filter.cameraHeadingVariance(camera));
-    if (headingsTurnedBy > 0) {
-      reopenAfterThisUpdate(camera, cameraTurnVariance[camera] + headingsTurnedBy);
-    }
-  }
-
-  /** Counts a rejection, and hands recovery what it needs to judge whether the cameras agree. */
-  private void noteRejection(ReplayedMeasurement replayed, PoseFilter.Innovation innovation) {
-    rejectedCount++;
-    consecutiveRejections++;
-    VisionMeasurement measurement = replayed.applied().measurement();
-    boolean positionAlonePasses =
-        innovation.positionChiSquared() <= config.gateChiSquaredPosition();
-    boolean solvedWithTheHeading = !measurement.lever().equals(VisionMeasurement.Lever.NONE);
-    boolean solvedWithAHeadingInDoubt = solvedWithTheHeading && headingInDoubt;
-    recovery.rejected(
-        new Recovery.Rejected(
-            replayed.time(),
-            measurement.camera(),
-            measurement.tagIds(),
-            innovation.xMeters(),
-            innovation.yMeters(),
-            innovation.headingRadians(),
-            positionAlonePasses,
-            !solvedWithAHeadingInDoubt));
-  }
-
-  /** Counts an acceptance: the estimate rests on a camera again, and nothing needs recovering. */
-  private void noteAcceptance(ReplayedMeasurement replayed, PoseFilter.Innovation innovation) {
-    acceptedCount++;
-    consecutiveRejections = 0;
-    recovery.clear();
-    lastAcceptedNanos = Math.max(lastAcceptedNanos, replayed.time());
-    motionEvidence.restedOnCamera(replayed.time());
-    agreements.add(new Agreement(replayed.time(), innovation.distanceMeters()));
-    placed = true;
-  }
-
-  /**
-   * Opens up again the turn of each camera this update found a sign of a knock for ({@link
-   * MountKnocks}), at the newest step. The history keeps that it did, so that a replay from before
-   * opens it again at the same step. What the watch on the cameras judged of the camera's mount is
-   * forgotten with it: its misses were judged against the turn it had.
-   */
-  private void reopenTheTurnsOfKnockedCameras() {
-    if (!started) {
-      return;
-    }
-    boolean anyReopened = false;
-    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
-      double variance = turnsToReopen[camera];
-      if (variance > 0) {
-        filter.reopenCameraTurn(camera, variance);
-        history.reopenedTurnAtNewestStep(camera, variance);
-        watch.forgetMount(camera);
-        turnsToReopen[camera] = 0;
-        anyReopened = true;
-      }
-    }
-    if (anyReopened) {
-      history.store(history.newestStep(), filter);
-    }
-  }
-
-  /**
-   * Notes that a camera's turn is to be opened up by a variance, once this update's replay ends.
-   */
-  private void reopenAfterThisUpdate(int camera, double variance) {
-    if (ConsideredErrors.hasPlace(camera)) {
-      turnsToReopen[camera] = Math.max(turnsToReopen[camera], variance);
-    }
-  }
-
-  /** Opens up again, in a replay, the cameras' turns that were opened up as a step ended. */
-  private void reopenTheTurnsReopenedAt(int step) {
-    for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
-      double variance = history.turnReopenedBy(step, camera);
-      if (variance > 0) {
-        filter.reopenCameraTurn(camera, variance);
-      }
-    }
-  }
-
-  /**
-   * When enough recent rejected measurements agree with each other, for independent reasons, the
-   * cameras are right and odometry is wrong. The estimate turns to the heading they agree on, if
-   * they agree its heading is wrong. Otherwise it jumps to where they put the robot. Either way its
-   * uncertainty starts afresh.
-   */
-  private void recoverIfTheCamerasAgree() {
-    if (!started) {
-      return;
-    }
-    recovery.forgetOlderThanTheWindow(history.newestTime());
-    if (!recovery.hasEnough()) {
-      return;
-    }
-    MotionEvidence.Sign sign = motionEvidence.sinceTheCameras();
-    OptionalDouble turn = recovery.headingCorrection(sign);
-    if (turn.isPresent()) {
-      filter.turn(
-          turn.getAsDouble(),
-          square(config.lostPositionStdDevMeters()),
-          square(Math.toRadians(config.recoveryHeadingStdDevDegrees())));
-      headingInDoubt = false;
-      startAfreshAfterRecovering();
-      return;
-    }
-    Optional<Recovery.Move> move = recovery.positionCorrection(sign);
-    if (move.isEmpty()) {
-      return;
-    }
-    Translation2d by = move.get().by();
-    filter.shift(by.getX(), by.getY(), square(config.recoveryStdDevMeters()));
-    startAfreshAfterRecovering();
-    // The estimate is as recent as the images it now rests on. A recovery made later, once an
-    // older image that held it back has aged out of the window, must not make them new.
-    lastAcceptedNanos = Math.max(lastAcceptedNanos, move.get().newestTaken());
-    motionEvidence.restedOnCamera(move.get().newestTaken());
-    placed = true;
-  }
-
-  /** After a recovery: the history starts again from it, and so do the doubts. */
-  private void startAfreshAfterRecovering() {
-    startHistoryHere();
-    wheelDoubt.forgetSuspectTravel();
-    recoveries++;
-    consecutiveRejections = 0;
-    recovery.clear();
-  }
-
-  /**
-   * Sets each doubted camera's turn and shift variances from its doubt, at the newest step, and
-   * keeps them there for a replay to start from. A replay from before restores the variances as
-   * they were then; each update sets them again.
-   *
-   * <p>A doubt of some meters adds its square to the camera's shift variance. The same doubt, seen
-   * from as far as its tags were, is a turn of the doubt over that distance, and adds that turn's
-   * square to the camera's turn variance. Until the distance has been judged, it adds no turn.
-   */
-  private void applyMountDoubts() {
-    if (!started || mountDoubts.isEmpty()) {
-      return;
-    }
-    for (Map.Entry<String, MountDoubt> told : mountDoubts.entrySet()) {
-      int camera = places.cameraPlace(told.getKey());
-      if (!ConsideredErrors.hasPlace(camera)) {
-        continue;
-      }
-      MountDoubt doubt = told.getValue();
-      double meters = doubt.meters();
-      double turnRadians = doubt.tagDistanceMeters() > 0 ? meters / doubt.tagDistanceMeters() : 0;
-      filter.setCameraVariances(
-          camera,
-          cameraTurnVariance[camera] + turnRadians * turnRadians,
-          cameraShiftVariance[camera] + meters * meters);
-    }
-    mountDoubts.clear();
-    history.store(history.newestStep(), filter);
+    return vision.update();
   }
 
   /**
@@ -1155,12 +424,8 @@ public final class PoseEstimator {
    * it has not heard enough from, and for one with no other to be judged against.
    */
   public double cameraDoubtMeters(String camera) {
-    return watch.doubtMeters(places.cameraPlace(camera));
+    return corrections.doubtMeters(places.placeIfAny(camera));
   }
-
-  // ---------------------------------------------------------------------------------------------
-  // What the estimator says.
-  // ---------------------------------------------------------------------------------------------
 
   /**
    * The cameras beyond the {@value ConsideredErrors#MAX_CAMERAS} whose repeated errors the
@@ -1256,7 +521,7 @@ public final class PoseEstimator {
    * other to be judged against.
    */
   public double cameraLateSeconds(String camera) {
-    return watch.lateSeconds(places.cameraPlace(camera));
+    return corrections.lateSeconds(places.placeIfAny(camera));
   }
 
   /**
@@ -1265,7 +530,7 @@ public final class PoseEstimator {
    * for, and for one it has heard nothing from.
    */
   public double cameraTurnDegrees(String camera) {
-    return Math.toDegrees(filter.cameraTurn(places.cameraPlace(camera)));
+    return Math.toDegrees(filter.cameraTurn(places.placeIfAny(camera)));
   }
 
   /**
@@ -1273,93 +538,72 @@ public final class PoseEstimator {
    * say more. NaN for a camera it has no place for, whose turn it takes as new in every image.
    */
   public double cameraTurnStdDevDegrees(String camera) {
-    return Math.toDegrees(filter.cameraTurnStdDev(places.cameraPlace(camera)));
+    return Math.toDegrees(filter.cameraTurnStdDev(places.placeIfAny(camera)));
+  }
+
+  /** How it weighs its sources. */
+  EstimatorConfig config() {
+    return config;
   }
 
   /** The current pose: cheap, for driving every loop. */
   public Pose2d pose() {
-    return filter.pose(yaw);
+    return filter.pose(yaw.radians());
   }
 
   /** The current estimate, with its uncertainty, velocity, mode, and health. */
   public LocalizationEstimate estimate() {
-    long now = 0;
-    OdometryHistory.Motion motion = OdometryHistory.Motion.NONE;
-    double wheelResidualMeters = 0;
-    if (started) {
-      now = history.newestTime();
-      motion = history.motionOver(VELOCITY_WINDOW_NANOS, filter.headingOffset());
-      wheelResidualMeters = history.wheelResidual(history.newestStep());
-    }
+    MeasurementBooks books = vision.books();
+    NewestStep newest = newestStep();
+    long now = newest.timeNanos();
     // Before odometry starts, nothing has said the gyro is lost.
-    boolean gyroConnected = !started || lastSource != YawSource.WHEELS;
-    boolean everAccepted = lastAcceptedNanos != Long.MIN_VALUE;
-    double visionAgeSeconds = Double.POSITIVE_INFINITY;
-    if (everAccepted) {
-      visionAgeSeconds = Timestamps.toSeconds(now - lastAcceptedNanos);
-    }
-    boolean camerasKeepDisagreeing = consecutiveRejections >= config.lostAfterRejections();
-    boolean visionRecent = everAccepted && now - lastAcceptedNanos <= visionTimeoutNanos;
+    boolean gyroConnected = !started || yaw.lastReader() != YawSource.WHEELS;
+    ModeFacts facts =
+        new ModeFacts(
+            gyroConnected,
+            vision.isPlaced(),
+            books.camerasKeepDisagreeing(config.lostAfterRejections()),
+            books.visionRecent(now, visionTimeoutNanos));
     return new LocalizationEstimate(
         now,
         pose(),
         filter.covariance(),
-        motion.fieldVelocity(),
-        motion.yawRateRadiansPerSecond(),
-        mode(gyroConnected, placed, camerasKeepDisagreeing, visionRecent),
-        new LocalizationEstimate.Health(
-            visionAgeSeconds,
-            acceptedCount,
-            rejectedCount,
-            lastInnovationMeters,
-            largestRecentDisagreement(now),
-            wheelResidualMeters,
-            wheelDoubt.suspectTravelMeters(),
-            wheelDoubt.conditions().tiltRadians(),
-            started && wheelDoubt.inCollisionAt(now),
-            recoveries,
-            gyroConnected));
+        newest.motion().fieldVelocity(),
+        newest.motion().yawRateRadiansPerSecond(),
+        facts.mode(),
+        LocalizationEstimate.Health.builder()
+            .visionAgeSeconds(books.visionAgeSeconds(now))
+            .accepted(books.accepted())
+            .rejected(books.rejected())
+            .lastInnovationMeters(books.lastInnovationMeters())
+            .recentDisagreementMeters(books.largestDisagreementSince(now - disagreementWindowNanos))
+            .residualMeters(newest.wheelResidualMeters())
+            .suspectTravelMeters(wheelDoubt.suspectTravelMeters())
+            .tiltRadians(wheelDoubt.conditions().tiltRadians())
+            .collisionActive(started && wheelDoubt.inCollisionAt(now))
+            .recoveries(books.recoveries())
+            .gyroConnected(gyroConnected)
+            .build());
   }
 
   /**
-   * The farthest any measurement accepted within the disagreement window was from the estimate, in
-   * meters; NaN if none was accepted in it.
+   * The newest odometry step as the estimate reports it: when it ended, how the robot moved over
+   * the last stretch, and how far the wheels disagreed in it.
    */
-  private double largestRecentDisagreement(long now) {
-    long windowStart = now - disagreementWindowNanos;
-    double largest = Double.NaN;
-    for (Agreement agreement : agreements) {
-      // Written so the first one replaces the NaN that "none yet" starts as.
-      boolean largerThanAnyYet = !(agreement.meters() <= largest);
-      if (agreement.time() >= windowStart && largerThanAnyYet) {
-        largest = agreement.meters();
-      }
-    }
-    return largest;
+  private record NewestStep(
+      long timeNanos, OdometryHistory.Motion motion, double wheelResidualMeters) {
+    /** Before odometry starts: no time, no motion, no disagreement. */
+    static final NewestStep NONE_YET = new NewestStep(0, OdometryHistory.Motion.NONE, 0);
   }
 
-  /**
-   * What the estimate rests on, in order: a lost gyro, then not placed yet, then cameras that keep
-   * disagreeing, then recent camera measurements, else odometry alone.
-   *
-   * @param lost whether the cameras have kept disagreeing, measurement after measurement
-   * @param visionRecent whether a camera measurement was accepted recently
-   */
-  static LocalizationEstimate.Mode mode(
-      boolean gyroConnected, boolean placed, boolean lost, boolean visionRecent) {
-    if (!gyroConnected) {
-      return LocalizationEstimate.Mode.IMU_FAULT;
+  private NewestStep newestStep() {
+    if (!started) {
+      return NewestStep.NONE_YET;
     }
-    if (!placed) {
-      return LocalizationEstimate.Mode.INITIALIZING;
-    }
-    if (lost) {
-      return LocalizationEstimate.Mode.LOST;
-    }
-    if (visionRecent) {
-      return LocalizationEstimate.Mode.TRACKING;
-    }
-    return LocalizationEstimate.Mode.DEAD_RECKONING;
+    return new NewestStep(
+        history.newestTime(),
+        history.motionOver(VELOCITY_WINDOW_NANOS, filter.headingOffset()),
+        history.wheelResidual(history.newestStep()));
   }
 
   private static double square(double value) {

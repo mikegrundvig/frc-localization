@@ -94,6 +94,8 @@ ext.published = [
     license: "BSD 3-Clause License",
 ]
 apply from: file("gradle/publishing.gradle")
+apply from: file("gradle/built-with.gradle")
+apply from: file("gradle/builder-docs.gradle")
 
 // Mutation testing: PIT changes localization's compiled code a little at a time (a comparison
 // turned round, a returned value emptied, a call removed) and runs the tests that cover each

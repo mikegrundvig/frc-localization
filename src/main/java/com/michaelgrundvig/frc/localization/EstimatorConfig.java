@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
 import static com.michaelgrundvig.frc.world.config.Rules.atLeast;
+import static com.michaelgrundvig.frc.world.config.Rules.atMost;
 import static com.michaelgrundvig.frc.world.config.Rules.below;
 import static com.michaelgrundvig.frc.world.config.Rules.nonNegative;
 import static com.michaelgrundvig.frc.world.config.Rules.positive;
@@ -24,6 +25,9 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  * @param tiltZeroDegrees at and above this tilt the wheels' travel counts for nothing: a robot
  *     climbing a bump or a ramp has wheels in the air (a top team scaled to zero at 25 degrees).
  *     Between the two, their travel counts for less, and the share left out counts as suspect.
+ * @param groundSlopeMarginDegrees on known raised ground, a tilt up to this much steeper than its
+ *     slopes is still the ground's (bumpers, suspension, and the IMU's mount), and the wheels stay
+ *     trusted through it. The bump procedure measures it (docs/calibration.md, tilt on a bump).
  * @param slipCorrelationSeconds how long slip keeps its direction. Suspect travel within this time
  *     adds up before it's squared: a slip that builds one way for a quarter second grows the
  *     uncertainty as one error, not as many small ones that would average out.
@@ -84,16 +88,12 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     along the field and across it (the field's tolerance, and how it was built): the same for
  *     every camera that sees it and every time it's seen, so the estimator keeps it apart for each
  *     tag, and a tag several cameras see counts once
- * @param headingCorrection what may correct the heading the gyro owns, beside measurements with a
- *     heading of their own; three ways under comparison (docs/testing.md). {@link
- *     HeadingCorrection#EVERY_FIX} is the default: it is what lets the cameras find the gyro's
- *     errors
  * @param cameraShiftCorrelationMeters how far the robot moves before what a camera's headings share
  *     is mostly new ({@code cameraShiftStdDevDegrees}): it sees other tags, or the same ones from
  *     elsewhere
  * @param cameraShiftCorrelationDegrees and how far it turns
  * @param historySeconds how far back a late camera measurement can still be applied at its capture
- *     time
+ *     time: at most {@value #MOST_HISTORY_SECONDS}
  * @param futureToleranceSeconds how far a measurement may be stamped after the newest odometry
  *     sample (clocks differ a little) before it's rejected
  * @param visionTimeoutSeconds how long without an accepted camera measurement before the estimate
@@ -128,6 +128,7 @@ public record EstimatorConfig(
     double residualScale,
     double tiltStartDegrees,
     double tiltZeroDegrees,
+    double groundSlopeMarginDegrees,
     double slipCorrelationSeconds,
     double collisionStdDevMeters,
     double collisionWindowSeconds,
@@ -146,7 +147,6 @@ public record EstimatorConfig(
     int cameraWatchMeasurements,
     double cameraClockStdDevSeconds,
     double tagPlacementStdDevMeters,
-    HeadingCorrection headingCorrection,
     double cameraShiftCorrelationMeters,
     double cameraShiftCorrelationDegrees,
     double historySeconds,
@@ -163,50 +163,58 @@ public record EstimatorConfig(
     double recoveryHeadingStdDevDegrees,
     int lostAfterRejections,
     double lostPositionStdDevMeters) {
+  /**
+   * The longest history the estimator keeps, in seconds. An image later than this is of a robot
+   * meters from where it now is, and the history's memory grows with its length: at a thousand
+   * steps a second, several megabytes a second of it.
+   */
+  public static final double MOST_HISTORY_SECONDS = 5;
+
   /** Starting points for a swerve robot with a good gyro. */
-  public static final EstimatorConfig DEFAULTS =
-      builder()
-          .translationStdDevPerMeter(0.03)
-          .translationStdDevPerRadian(0.02)
-          .residualScale(1.0)
-          .tiltStartDegrees(5)
-          .tiltZeroDegrees(25)
-          .slipCorrelationSeconds(0.5)
-          .collisionStdDevMeters(0.25)
-          .collisionWindowSeconds(0.25)
-          .handlingStdDevPerSqrtSecond(0.02)
-          .headingDriftDegreesPerMinute(0.5)
-          .headingStdDevDegreesPerTurn(3.6)
-          .gyroErrors(GyroErrors.ESTIMATED)
-          .gyroScaleWanderPercentPerMinute(0.02)
-          .gyroDriftStdDevDegreesPerMinute(5.0)
-          .gyroDriftWanderDegreesPerMinute(0.1)
-          .backupHeadingStdDevDegreesPerTurn(2.0)
-          .headingNoiseDegreesPerTurn(0.1)
-          .wheelHeadingStdDevDegreesPerTurn(10)
-          .cameraShiftStdDevMeters(0.004)
-          .cameraShiftStdDevDegrees(2.0)
-          .cameraWatchMeasurements(25)
-          .cameraClockStdDevSeconds(0.003)
-          .tagPlacementStdDevMeters(0.01)
-          .headingCorrection(HeadingCorrection.EVERY_FIX)
-          .cameraShiftCorrelationMeters(1.0)
-          .cameraShiftCorrelationDegrees(45)
-          .historySeconds(1.5)
-          .futureToleranceSeconds(0.05)
-          .visionTimeoutSeconds(1.0)
-          .disagreementWindowSeconds(0.5)
-          .gateChiSquaredPosition(13.816)
-          .gateChiSquaredPose(16.266)
-          .recoveryMeasurements(3)
-          .recoveryWindowSeconds(1.0)
-          .recoveryAgreementMeters(0.25)
-          .recoveryStdDevMeters(0.25)
-          .recoveryAgreementDegrees(5)
-          .recoveryHeadingStdDevDegrees(2)
-          .lostAfterRejections(2)
-          .lostPositionStdDevMeters(1.0)
-          .build();
+  public static EstimatorConfig defaults() {
+    return builder()
+        .translationStdDevPerMeter(0.03)
+        .translationStdDevPerRadian(0.02)
+        .residualScale(1.0)
+        .tiltStartDegrees(5)
+        .tiltZeroDegrees(25)
+        .groundSlopeMarginDegrees(3)
+        .slipCorrelationSeconds(0.5)
+        .collisionStdDevMeters(0.25)
+        .collisionWindowSeconds(0.25)
+        .handlingStdDevPerSqrtSecond(0.02)
+        .headingDriftDegreesPerMinute(0.5)
+        .headingStdDevDegreesPerTurn(3.6)
+        .gyroErrors(GyroErrors.ESTIMATED)
+        .gyroScaleWanderPercentPerMinute(0.02)
+        .gyroDriftStdDevDegreesPerMinute(5.0)
+        .gyroDriftWanderDegreesPerMinute(0.1)
+        .backupHeadingStdDevDegreesPerTurn(2.0)
+        .headingNoiseDegreesPerTurn(0.1)
+        .wheelHeadingStdDevDegreesPerTurn(10)
+        .cameraShiftStdDevMeters(0.004)
+        .cameraShiftStdDevDegrees(2.0)
+        .cameraWatchMeasurements(25)
+        .cameraClockStdDevSeconds(0.003)
+        .tagPlacementStdDevMeters(0.01)
+        .cameraShiftCorrelationMeters(1.0)
+        .cameraShiftCorrelationDegrees(45)
+        .historySeconds(1.5)
+        .futureToleranceSeconds(0.05)
+        .visionTimeoutSeconds(1.0)
+        .disagreementWindowSeconds(0.5)
+        .gateChiSquaredPosition(13.816)
+        .gateChiSquaredPose(16.266)
+        .recoveryMeasurements(3)
+        .recoveryWindowSeconds(1.0)
+        .recoveryAgreementMeters(0.25)
+        .recoveryStdDevMeters(0.25)
+        .recoveryAgreementDegrees(5)
+        .recoveryHeadingStdDevDegrees(2)
+        .lostAfterRejections(2)
+        .lostPositionStdDevMeters(1.0)
+        .build();
+  }
 
   public EstimatorConfig {
     Checks.on(EstimatorConfig.class)
@@ -215,6 +223,7 @@ public record EstimatorConfig(
         .field("residualScale", residualScale, nonNegative())
         .field("tiltStartDegrees", tiltStartDegrees, nonNegative())
         .field("tiltZeroDegrees", tiltZeroDegrees, below(90))
+        .field("groundSlopeMarginDegrees", groundSlopeMarginDegrees, nonNegative())
         .field("slipCorrelationSeconds", slipCorrelationSeconds, positive())
         .field("collisionStdDevMeters", collisionStdDevMeters, nonNegative())
         .field("collisionWindowSeconds", collisionWindowSeconds, positive())
@@ -236,6 +245,7 @@ public record EstimatorConfig(
         .field("cameraShiftCorrelationMeters", cameraShiftCorrelationMeters, positive())
         .field("cameraShiftCorrelationDegrees", cameraShiftCorrelationDegrees, positive())
         .field("historySeconds", historySeconds, positive())
+        .field("historySeconds", historySeconds, atMost(MOST_HISTORY_SECONDS))
         .field("futureToleranceSeconds", futureToleranceSeconds, nonNegative())
         .field("visionTimeoutSeconds", visionTimeoutSeconds, positive())
         .field("disagreementWindowSeconds", disagreementWindowSeconds, positive())
@@ -251,48 +261,16 @@ public record EstimatorConfig(
         .field("lostPositionStdDevMeters", lostPositionStdDevMeters, positive())
         .check(
             "tiltZeroDegrees",
-            () ->
-                tiltZeroDegrees > tiltStartDegrees
-                    ? null
-                    : shown(tiltZeroDegrees)
-                        + " must be above tiltStartDegrees ("
-                        + shown(tiltStartDegrees)
-                        + "): wheels stop counting above where they start to count less")
+            () -> {
+              if (tiltZeroDegrees > tiltStartDegrees) {
+                return null;
+              }
+              return shown(tiltZeroDegrees)
+                  + " must be above tiltStartDegrees ("
+                  + shown(tiltStartDegrees)
+                  + "): wheels stop counting above where they start to count less";
+            })
         .orThrow();
-  }
-
-  /**
-   * What corrects the heading beside the gyro. A camera's position solved with the gyro's heading
-   * leans on it, and so says something about the heading too; whether that's let correct the
-   * heading is the choice. Each is honest about its uncertainty; they differ in what they trust the
-   * cameras with.
-   */
-  public enum HeadingCorrection {
-    /**
-     * Only measurements with a heading of their own (multi-tag solves, under strict conditions),
-     * with all three of their rows: a position solved with the gyro's heading carries the heading's
-     * doubt but never turns it, so the gyro owns heading. Honest on a calibrated robot; a camera
-     * turned on its mount turns the heading with its own headings, and the mount check then doubts
-     * the cameras that disagree with it.
-     */
-    HEADING_MEASUREMENTS,
-    /**
-     * As {@link #HEADING_MEASUREMENTS}, and a camera the mount check doubts has that doubt added to
-     * the errors it repeats in every image (its turn and shift), so its headings can pull the
-     * heading only so far, however many there are. Only as good as the mount check's verdict: with
-     * a camera turned, much of the doubt lands on its neighbour too (docs/testing.md).
-     */
-    HEADING_MEASUREMENTS_AND_MOUNT_DOUBT,
-    /**
-     * Every fix: a position fix corrects the heading too, through how far its tags are and how the
-     * position's error has come to depend on the heading's. A full Kalman update: more accurate in
-     * heading after turns. With a camera turned on its mount, its positions turn the heading, and
-     * the mount check then doubts its healthy neighbour more than it. It leans on the images'
-     * capture times while the robot turns: an image stamped a few milliseconds late shows the robot
-     * turned a little less, as a heading error would, the same way in every image, so check them
-     * before choosing it (docs/testing.md, docs/characterization.md).
-     */
-    EVERY_FIX
   }
 
   /**

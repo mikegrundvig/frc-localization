@@ -50,6 +50,19 @@ final class Matrices {
     return true;
   }
 
+  /**
+   * Whether a symmetric 2x2 matrix {@code [a b; b c]} has an inverse to measure a distance by: its
+   * determinant positive, and not so small beside the matrix's size that it counts as zero, by the
+   * same tolerance as {@link #invert3}. The size is the sum of the diagonal's magnitudes, squared,
+   * because a 2x2 determinant is a difference of products of two of its numbers.
+   */
+  static boolean invertible2(double a, double b, double c) {
+    double determinant = a * c - b * b;
+    double size = Math.abs(a) + Math.abs(c);
+    // Written so that a determinant that isn't a number counts as singular too.
+    return determinant > SINGULAR_BELOW * size * size;
+  }
+
   /** The number {@code v^T M v}, for a 3x3 matrix {@code M} and a vector {@code v} of three. */
   static double quadratic3(double[] m, double[] v) {
     double sum = 0;

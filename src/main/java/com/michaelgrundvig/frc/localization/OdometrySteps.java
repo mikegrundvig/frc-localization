@@ -64,12 +64,27 @@ final class OdometrySteps {
     List<Step> steps = new ArrayList<>(wheels.size());
     for (OdometrySample reading : wheels) {
       OdometrySample previous = lastReading;
+      if (noNewer(reading, previous)) {
+        continue;
+      }
       BodyMotion motion =
           previous == null ? new BodyMotion(0, 0, 0, 0) : kinematics.motion(previous, reading);
       steps.add(new Step(reading.timestampNanos(), motion, yawAt(yawFrom, reading)));
       lastReading = reading;
     }
     return new Loop(steps, yawFrom);
+  }
+
+  /**
+   * Whether a wheel reading is no newer than the one before: taken twice, or out of order. It has
+   * no step of its own, and the next reading's motion is measured from the one before it, since the
+   * estimator ignores such a step and would otherwise lose, or count twice, the travel it says.
+   */
+  private static boolean noNewer(OdometrySample reading, @Nullable OdometrySample previous) {
+    if (previous == null) {
+      return false;
+    }
+    return reading.timestampNanos() <= previous.timestampNanos();
   }
 
   /** What turns odometry now: what the yaws came from in the last loop that had wheel readings. */

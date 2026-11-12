@@ -53,7 +53,7 @@ public record FrameVerdict(
   }
 
   /** Why, in words with its numbers, as the log has them: "gate: 45.2 > 13.8", "too far: 6.3 m". */
-  public String reason() {
+  public String described() {
     return verdict.describe(value, threshold);
   }
 
@@ -83,28 +83,32 @@ public record FrameVerdict(
     }
   }
 
-  /** What the estimator decided about one camera measurement, by tag. */
-  static FrameVerdict of(VisionDecision decision) {
-    VisionMeasurement measurement = decision.measurement();
-    Verdict verdict = decision.verdict();
-    List<TagVerdict> tags = new ArrayList<>(measurement.tagIds().size());
+  /**
+   * What the estimator decided about one camera measurement, by tag: the tags it rested on, each
+   * with the measurement's verdict, then those its image left out, each with why.
+   *
+   * @param leftOut the tags the pipeline left out of the measurement's image
+   */
+  static FrameVerdict of(MeasurementVerdict weighed, List<TagVerdict> leftOut) {
+    VisionMeasurement measurement = weighed.measurement();
+    Verdict verdict = weighed.verdict();
+    List<TagVerdict> tags = new ArrayList<>(measurement.tagIds().size() + leftOut.size());
     for (int id : measurement.tagIds()) {
       tags.add(
           TagVerdict.builder()
               .tag(id)
               .verdict(verdict)
-              .innovationMeters(decision.innovationMeters())
-              .chiSquared(decision.chiSquared())
-              .threshold(decision.threshold())
-              .value(decision.chiSquared())
+              .threshold(weighed.threshold())
+              .value(weighed.chiSquared())
               .build());
     }
+    tags.addAll(leftOut);
     return builder()
         .camera(measurement.camera())
         .captureNanos(measurement.timestampNanos())
         .verdict(verdict)
-        .threshold(decision.threshold())
-        .value(decision.chiSquared())
+        .threshold(weighed.threshold())
+        .value(weighed.chiSquared())
         .multiTag(
             measurement.solver() == VisionMeasurement.Solver.MULTI_TAG
                 ? Optional.of(verdict)
@@ -115,21 +119,22 @@ public record FrameVerdict(
                 Measured.builder()
                     .pose(measurement.pose())
                     .solver(measurement.solver())
-                    .innovationMeters(decision.innovationMeters())
-                    .chiSquared(decision.chiSquared())
+                    .innovationMeters(weighed.innovationMeters())
+                    .chiSquared(weighed.chiSquared())
                     .build()))
         .build();
   }
 
   /**
    * A measurement given to a localizer that does not report what became of it: every tag it rested
-   * on, given, and nothing compared.
+   * on, given, and nothing compared; then those its image left out, each with why.
    */
-  static FrameVerdict given(VisionMeasurement measurement) {
-    List<TagVerdict> tags = new ArrayList<>(measurement.tagIds().size());
+  static FrameVerdict given(VisionMeasurement measurement, List<TagVerdict> leftOut) {
+    List<TagVerdict> tags = new ArrayList<>(measurement.tagIds().size() + leftOut.size());
     for (int id : measurement.tagIds()) {
       tags.add(TagVerdict.builder().tag(id).verdict(Verdict.GIVEN).build());
     }
+    tags.addAll(leftOut);
     return builder()
         .camera(measurement.camera())
         .captureNanos(measurement.timestampNanos())
@@ -141,11 +146,71 @@ public record FrameVerdict(
         .build();
   }
 
-  /** An image the robot held back, solved: every tag it saw, held. */
-  static FrameVerdict held(TagDetections image, Verdict why) {
-    List<TagVerdict> tags = new ArrayList<>(image.tags().size());
-    for (TagDetections.Tag tag : image.tags()) {
+  /**
+   * An image the robot held back, solved: every tag it was solved from, held, and those the
+   * pipeline left out, each with why.
+   */
+  static FrameVerdict held(ImageVerdict result, Verdict why) {
+    TagDetections image = result.detections();
+    List<TagVerdict> tags = new ArrayList<>(image.tags().size() + result.leftOutTags().size());
+    for (TagDetections.Sighting tag : image.tags()) {
+      if (!isLeftOut(tag.id(), result.leftOutTags())) {
+        tags.add(TagVerdict.builder().tag(tag.id()).verdict(why).build());
+      }
+    }
+    tags.addAll(result.leftOutTags());
+    return builder()
+        .camera(image.camera())
+        .captureNanos(image.timestampNanos())
+        .verdict(why)
+        .tags(tags)
+        .build();
+  }
+
+  /**
+   * An image the pipeline refused, before it became a measurement: every tag it saw, refused with
+   * it, but for those left out first, each with its own reason.
+   */
+  static FrameVerdict refused(ImageVerdict result) {
+    Verdict verdict = result.refused();
+    if (verdict == null) {
+      throw new IllegalArgumentException("the image became a measurement: it wasn't refused");
+    }
+    TagDetections image = result.detections();
+    List<TagVerdict> tags = new ArrayList<>(image.tags().size() + result.leftOutTags().size());
+    for (TagDetections.Sighting tag : image.tags()) {
+      if (!isLeftOut(tag.id(), result.leftOutTags())) {
+        tags.add(
+            TagVerdict.builder()
+                .tag(tag.id())
+                .verdict(verdict)
+                .threshold(result.threshold())
+                .value(result.value())
+                .build());
+      }
+    }
+    tags.addAll(result.leftOutTags());
+    return builder()
+        .camera(image.camera())
+        .captureNanos(image.timestampNanos())
+        .verdict(verdict)
+        .threshold(result.threshold())
+        .value(result.value())
+        .tags(tags)
+        .build();
+  }
+
+  /**
+   * An image the robot left out before it was solved (its camera turned off, the same image again,
+   * one out of step): every tag it saw, solved or not, left out with it.
+   */
+  static FrameVerdict leftOut(TagDetections image, Verdict why) {
+    List<TagVerdict> tags = new ArrayList<>(image.tags().size() + image.unsolvedTags().size());
+    for (TagDetections.Sighting tag : image.tags()) {
       tags.add(TagVerdict.builder().tag(tag.id()).verdict(why).build());
+    }
+    for (int id : image.unsolvedTags()) {
+      tags.add(TagVerdict.builder().tag(id).verdict(why).build());
     }
     return builder()
         .camera(image.camera())
@@ -155,30 +220,12 @@ public record FrameVerdict(
         .build();
   }
 
-  /** An image the pipeline refused, before it became a measurement: every tag it saw, refused. */
-  static FrameVerdict refused(VisionResult result) {
-    Verdict verdict = result.refused();
-    if (verdict == null) {
-      throw new IllegalArgumentException("the image became a measurement: it wasn't refused");
+  private static boolean isLeftOut(int tag, List<TagVerdict> leftOut) {
+    for (TagVerdict out : leftOut) {
+      if (out.tag() == tag) {
+        return true;
+      }
     }
-    TagDetections image = result.detections();
-    List<TagVerdict> tags = new ArrayList<>(image.tags().size());
-    for (TagDetections.Tag tag : image.tags()) {
-      tags.add(
-          TagVerdict.builder()
-              .tag(tag.id())
-              .verdict(verdict)
-              .threshold(result.threshold())
-              .value(result.value())
-              .build());
-    }
-    return builder()
-        .camera(image.camera())
-        .captureNanos(image.timestampNanos())
-        .verdict(verdict)
-        .threshold(result.threshold())
-        .value(result.value())
-        .tags(tags)
-        .build();
+    return false;
   }
 }

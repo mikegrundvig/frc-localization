@@ -19,7 +19,7 @@ import org.wpilib.math.linalg.VecBuilder;
  * in a robot's configuration:
  *
  * <pre>{@code
- * .localizer(WpilibLocalizer::new)
+ * .withLocalizer(WpilibLocalizer::new)
  * }</pre>
  *
  * <p>It is given what the {@link DefaultLocalizer} is given: every wheel reading, at the rate the
@@ -50,10 +50,20 @@ import org.wpilib.math.linalg.VecBuilder;
  *   <li><b>A measurement with no heading.</b> WPILib has no way to say a measurement knows nothing
  *       of the heading. Such a measurement is given a heading standard deviation of a million
  *       radians, which turns the estimate by less than a millionth of the difference.
+ *   <li><b>A single tag's heading.</b> It is given to WPILib as the pipeline solved it, with the
+ *       pipeline's standard deviation for it, which grows with the tag's distance squared. On
+ *       Visor's cameras, which send no multi-tag solution, single tags' headings are the only ones
+ *       the cameras give: without them nothing would ever correct a wrong heading. The estimator
+ *       study measured both (runtime/docs/localizers.md): kept, a robot set down 30° off or
+ *       backwards finds its heading in under two seconds; ignored, as strong teams' filters do, it
+ *       never does.
  *   <li><b>How x and y vary together.</b> WPILib takes a standard deviation for each of x, y and
  *       heading. A measurement's covariance between x and y is dropped.
  *   <li><b>Measurements it cannot use.</b> WPILib drops one older than the second and a half of
- *       odometry it keeps, without saying so. {@link #tooOld} counts them.
+ *       odometry it keeps, without saying so. {@link #tooOld} counts them. One whose pose isn't a
+ *       number would turn WPILib's estimate to NaN for good, so it is never given to it.
+ *   <li><b>A wheel reading no newer than the last.</b> One taken twice, or out of order, is
+ *       ignored: WPILib would take it out of order.
  *   <li><b>How far odometry is trusted.</b> The state standard deviations are WPILib's defaults,
  *       0.1 m and 0.1 rad, unless the robot gives its own. WPILib uses them with each measurement's
  *       to set one fixed gain for that measurement. It does not grow less sure as the robot drives
@@ -81,22 +91,14 @@ public final class WpilibLocalizer implements Localizer {
    */
   private static final long STILL_NOW_NANOS = 20_000_000L;
 
-  /** Which sensor the yaw came from at a wheel reading. */
-  private enum Turning {
-    GYRO,
-    BACKUP,
-    WHEELS,
-    /** Before the first wheel reading. */
-    NOTHING_YET
-  }
-
   private final SwerveDriveKinematics kinematics;
   private final SwerveDrivePoseEstimator estimator;
 
   /** The yaw given to WPILib, in radians: carried across a change of the sensor that turns it. */
   private double yawRadians;
 
-  private Turning turnedBy = Turning.NOTHING_YET;
+  /** Which sensor the yaw came from at the newest wheel reading: empty before the first. */
+  private Optional<YawSource> turnedBy = Optional.empty();
 
   /** What the sensor that turned the yaw last read, to measure its next reading from. */
   private double lastYawReading;
@@ -172,13 +174,16 @@ public final class WpilibLocalizer implements Localizer {
   @Override
   public void odometry(DrivetrainReadings readings, LoopContext loop) {
     for (OdometrySample sample : readings.wheels()) {
+      if (noNewerThanTheLast(sample)) {
+        continue;
+      }
       SwerveModulePosition[] read = positions(sample);
-      Turning before = turnedBy;
+      boolean firstReading = turnedBy.isEmpty();
       Rotation2d yaw = yawAt(sample, read, readings);
       wheels = read;
       newestNanos = sample.timestampNanos();
       double seconds = Timestamps.toSeconds(newestNanos);
-      if (before == Turning.NOTHING_YET) {
+      if (firstReading) {
         // Wheels that have already rolled are where the robot starts, not a distance it drove.
         estimator.resetPosition(yaw, read, estimator.getEstimatedPosition());
       }
@@ -209,6 +214,9 @@ public final class WpilibLocalizer implements Localizer {
     oldestFirst.sort(Comparator.comparingLong(VisionMeasurement::timestampNanos));
     for (VisionMeasurement measurement : oldestFirst) {
       offered++;
+      if (!isANumber(measurement.pose())) {
+        continue;
+      }
       double seconds = Timestamps.toSeconds(measurement.timestampNanos());
       if (!willCorrect(seconds)) {
         continue;
@@ -223,6 +231,30 @@ public final class WpilibLocalizer implements Localizer {
           seconds,
           VecBuilder.fill(covariance.xStdDev(), covariance.yStdDev(), headingStdDev));
     }
+  }
+
+  /**
+   * Whether a wheel reading is no newer than the last one taken in: a reading taken twice, or out
+   * of order. WPILib would put it into its history out of order and run the time backwards, so it
+   * is ignored, as the default localizer ignores it.
+   */
+  private boolean noNewerThanTheLast(OdometrySample sample) {
+    if (turnedBy.isEmpty()) {
+      return false;
+    }
+    return sample.timestampNanos() <= newestNanos;
+  }
+
+  /**
+   * Whether a measurement's pose is a number. WPILib would take one that isn't into its estimate,
+   * and every pose after it would be NaN until the robot is placed again. Its spreads need no such
+   * check: a {@link PoseCovariance} refuses a position variance that isn't a finite number, and a
+   * heading variance that isn't one is no heading here.
+   */
+  private static boolean isANumber(Pose2d pose) {
+    return Double.isFinite(pose.getX())
+        && Double.isFinite(pose.getY())
+        && Double.isFinite(pose.getRotation().getRadians());
   }
 
   // ---- What it says ----
@@ -300,23 +332,24 @@ public final class WpilibLocalizer implements Localizer {
    */
   private Rotation2d yawAt(
       OdometrySample sample, SwerveModulePosition[] read, DrivetrainReadings loop) {
-    Turning source = Turning.WHEELS;
+    YawSource source = YawSource.WHEELS;
     double reading = 0;
     if (hasYaws(loop.gyro())) {
-      source = Turning.GYRO;
+      source = YawSource.GYRO;
       reading = yawAt(loop.gyro().yaws(), sample.timestampNanos());
     } else if (hasYaws(loop.backupImu())) {
-      source = Turning.BACKUP;
+      source = YawSource.BACKUP;
       reading = yawAt(loop.backupImu().yaws(), sample.timestampNanos());
     }
-    boolean sameImuAsBefore = source != Turning.WHEELS && source == turnedBy;
+    boolean sameImuAsBefore =
+        source != YawSource.WHEELS && turnedBy.isPresent() && turnedBy.get() == source;
     if (sameImuAsBefore) {
       yawRadians += reading - lastYawReading;
-    } else if (turnedBy != Turning.NOTHING_YET) {
+    } else if (turnedBy.isPresent()) {
       // With no IMU, or in the step one takes over from another, the wheels say the turn.
       yawRadians += kinematics.toTwist2d(wheels, read).dtheta;
     }
-    turnedBy = source;
+    turnedBy = Optional.of(source);
     lastYawReading = reading;
     return new Rotation2d(yawRadians);
   }

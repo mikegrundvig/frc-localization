@@ -28,7 +28,7 @@ import org.wpilib.math.util.MathUtil;
  * <p>The heading is settled before the position. Positions solved with the estimate's own heading
  * agree with each other whether it is the position or the heading that is wrong: a heading off by
  * an angle turns every one of them about its tags alike. So while the heading is in doubt those
- * positions do not vote on the position ({@link Rejected#positionCounts}), and the cameras' own
+ * positions do not vote on the position ({@link PositionSays#NOT_COUNTED}), and the cameras' own
  * headings settle the heading first.
  */
 final class Recovery {
@@ -53,11 +53,7 @@ final class Recovery {
    * @param innovationY and along y
    * @param innovationHeading how far its heading was from the estimate's, in radians; NaN when the
    *     measurement had no heading of its own ({@link #hasHeading})
-   * @param positionAgreed whether its position alone passed the gate, so that only its heading
-   *     disagreed
-   * @param positionCounts whether its position can say the estimate's position is wrong. One solved
-   *     with a heading in doubt cannot: it lands off by that heading's error however right the
-   *     position is, and the same way in every image that shares it
+   * @param position what its position says of the estimate's
    */
   record Rejected(
       long time,
@@ -66,16 +62,28 @@ final class Recovery {
       double innovationX,
       double innovationY,
       double innovationHeading,
-      boolean positionAgreed,
-      boolean positionCounts) {
+      PositionSays position) {
     boolean hasHeading() {
       return !Double.isNaN(innovationHeading);
     }
 
     /** Whether it is evidence that the estimate's position is wrong. */
     boolean saysThePositionIsWrong() {
-      return !positionAgreed && positionCounts;
+      return position == PositionSays.WRONG;
     }
+  }
+
+  /** What a rejected measurement's position says of the estimate's. */
+  enum PositionSays {
+    /** That it is wrong: the measurement's position alone failed the gate. */
+    WRONG,
+    /** That it is right: the position alone passed the gate, and only the heading disagreed. */
+    AGREES,
+    /**
+     * Nothing: it was solved with a heading in doubt, so it lands off by that heading's error
+     * however right it is, and the same way in every image that shares the heading.
+     */
+    NOT_COUNTED
   }
 
   /**
@@ -129,11 +137,17 @@ final class Recovery {
    * <p>They must come from two cameras, or something besides the cameras must say the robot may
    * have moved: one camera turned on its mount gives the same wrong heading in every image.
    *
+   * <p>Their mean must also be past what the estimate's own doubt allows ({@code
+   * leastTurnRadians}): a turn its heading's spread and the cameras' mounts explain is no sign that
+   * the heading is wrong, and is left to the measurements the gate takes.
+   *
    * @param sign what besides the cameras says the robot may have moved since the estimate last
    *     rested on a camera
+   * @param leastTurnRadians the smallest turn that says the heading is wrong: the estimate's doubt
+   *     of the heading the cameras should see, or the agreement angle, whichever is wider
    * @return the turn in radians, or empty if they do not agree on one
    */
-  OptionalDouble headingCorrection(MotionEvidence.Sign sign) {
+  OptionalDouble headingCorrection(MotionEvidence.Sign sign, double leastTurnRadians) {
     latest.clear();
     for (Iterator<Rejected> newestFirst = recent.descendingIterator();
         newestFirst.hasNext() && latest.size() < measurementsNeeded; ) {
@@ -161,7 +175,8 @@ final class Recovery {
     }
     // Headings that agree with the estimate's ask for no turn: what was rejected was their
     // positions. Written so that a mean that is not a number asks for none either.
-    boolean asksForATurn = Math.abs(MathUtil.angleModulus(mean)) > agreementRadians;
+    double least = Math.max(agreementRadians, leastTurnRadians);
+    boolean asksForATurn = Math.abs(MathUtil.angleModulus(mean)) > least;
     if (!asksForATurn) {
       return OptionalDouble.empty();
     }
@@ -218,6 +233,36 @@ final class Recovery {
       return Optional.empty();
     }
     return Optional.of(new Move(new Translation2d(meanX, meanY), newestTaken));
+  }
+
+  /**
+   * What made the rejections last judged independent of each other, for the correction they agreed
+   * on: another camera, then another tag (which counts for a position alone), then what besides the
+   * cameras said the robot may have moved.
+   *
+   * @param tagsCount whether two tags count, as they do for a position, and not for a heading
+   */
+  Recovered.Evidence evidence(MotionEvidence.Sign sign, boolean tagsCount) {
+    if (fromTwoCameras()) {
+      return Recovered.Evidence.TWO_CAMERAS;
+    }
+    if (tagsCount && fromTwoTags()) {
+      return Recovered.Evidence.TWO_TAGS;
+    }
+    return switch (sign) {
+      case PLACED -> Recovered.Evidence.PLACED;
+      case HIT -> Recovered.Evidence.HIT;
+      case SLID -> Recovered.Evidence.SLID;
+      case LIFTED -> Recovered.Evidence.LIFTED;
+      case DISABLED -> Recovered.Evidence.DISABLED;
+      // Not reached: a correction is found only on independent evidence.
+      case NONE -> throw new IllegalStateException("a recovery on no independent evidence");
+    };
+  }
+
+  /** How many rejections the last judgement took. */
+  int judged() {
+    return latest.size();
   }
 
   /** Whether the rejections being judged came from more than one camera. */

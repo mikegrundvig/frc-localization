@@ -5,14 +5,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.assertj.core.api.Assertions.within;
 
+import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.wpilib.math.geometry.Pose2d;
 import org.wpilib.math.geometry.Rotation2d;
+import org.wpilib.math.geometry.Transform2d;
 import org.wpilib.math.geometry.Translation2d;
 import org.wpilib.math.geometry.Twist2d;
 
@@ -35,7 +40,7 @@ class PoseEstimatorTest {
    * or with a configuration built from it, has its cameras' mounts exact ({@link Robot}).
    */
   private static final EstimatorConfig TEXTBOOK =
-      EstimatorConfigBuilder.builder(EstimatorConfig.DEFAULTS)
+      EstimatorConfigBuilder.builder(EstimatorConfig.defaults())
           .cameraShiftStdDevMeters(0)
           .cameraShiftStdDevDegrees(0)
           .tagPlacementStdDevMeters(0)
@@ -53,10 +58,15 @@ class PoseEstimatorTest {
      * is.
      */
     Robot(EstimatorConfig config, PoseReset start) {
+      this(config, HeadingCorrection.EVERY_FIX, start);
+    }
+
+    /** The same, its estimator correcting the heading this way. */
+    Robot(EstimatorConfig config, HeadingCorrection heading, PoseReset start) {
       boolean textbook = config.cameraShiftStdDevMeters() == 0;
-      List<com.michaelgrundvig.frc.world.robot.CameraConfig> cameras =
+      List<CameraConfig> cameras =
           textbook ? TestCameras.exact("front", "left", "right", "sound", "knocked") : List.of();
-      estimator = new PoseEstimator(config, point -> field(point), TAGS, cameras, start);
+      estimator = new PoseEstimator(config, heading, point -> field(point), TAGS, cameras, start);
       estimator.addOdometry(time, new BodyMotion(0, 0, 0, 0), gyroYaw, YawSource.GYRO);
     }
 
@@ -91,7 +101,7 @@ class PoseEstimatorTest {
     }
 
     /** A camera's heading, good to a fifth of a degree, with the robot where it is, taken now. */
-    VisionDecision seeHeading(double radians) {
+    MeasurementVerdict seeHeading(double radians) {
       estimator.addVision(
           new VisionMeasurement(
               time,
@@ -118,7 +128,26 @@ class PoseEstimatorTest {
       return this;
     }
 
-    List<VisionDecision> see(Pose2d pose, long when, PoseCovariance noise) {
+    /**
+     * Drives at robot-relative velocities for a while, with this many odometry steps a second: the
+     * steps end on a whole number of nanoseconds, so a rate that doesn't divide a second still ends
+     * on time.
+     */
+    Robot driveFor(double seconds, int stepsPerSecond, double vx, double vy, double omega) {
+      long from = time;
+      int steps = (int) Math.round(seconds * stepsPerSecond);
+      for (int i = 1; i <= steps; i++) {
+        long end = from + i * 1_000_000_000L / stepsPerSecond;
+        double dt = (end - time) / 1e9;
+        time = end;
+        gyroYaw += omega * dt;
+        estimator.addOdometry(
+            time, new BodyMotion(vx * dt, vy * dt, omega * dt, 0), gyroYaw, YawSource.GYRO);
+      }
+      return this;
+    }
+
+    List<MeasurementVerdict> see(Pose2d pose, long when, PoseCovariance noise) {
       estimator.addVision(
           new VisionMeasurement(
               when,
@@ -135,7 +164,7 @@ class PoseEstimatorTest {
      * A position solved with the gyro's heading, from tags this far from the robot on the field,
      * taken now.
      */
-    VisionDecision seeLeaning(Pose2d pose, Translation2d robotToTags, double stdDev) {
+    MeasurementVerdict seeLeaning(Pose2d pose, Translation2d robotToTags, double stdDev) {
       estimator.addVision(
           new VisionMeasurement(
               time,
@@ -152,7 +181,7 @@ class PoseEstimatorTest {
      * One camera's position solved with the gyro's heading, good to 2 cm, from tags 3 m ahead of
      * the robot, taken now.
      */
-    VisionDecision seeFrom(String camera, Pose2d pose) {
+    MeasurementVerdict seeFrom(String camera, Pose2d pose) {
       estimator.addVision(
           new VisionMeasurement(
               time,
@@ -166,7 +195,7 @@ class PoseEstimatorTest {
     }
 
     /** A camera measurement with heading, from several tags, taken now. */
-    VisionDecision seeWithHeading(Pose2d pose) {
+    MeasurementVerdict seeWithHeading(Pose2d pose) {
       estimator.addVision(
           new VisionMeasurement(
               time,
@@ -271,10 +300,10 @@ class PoseEstimatorTest {
         new PoseReset(T0, START, PoseCovariance.fromStdDevs(0.1, 0.1, 0.02), "x"));
     robot.drive(1, 0, 0, 0);
 
-    List<VisionDecision> decisions =
+    List<MeasurementVerdict> decisions =
         robot.see(new Pose2d(1.2, 1, Rotation2d.ZERO), robot.time, position(0.1));
 
-    assertThat(decisions).singleElement().extracting(VisionDecision::accepted).isEqualTo(true);
+    assertThat(decisions).singleElement().extracting(MeasurementVerdict::accepted).isEqualTo(true);
     assertThat(robot.pose().getX()).as("equal trust: halfway").isCloseTo(1.1, within(1e-6));
     assertThat(robot.estimate().covariance().xStdDev()).isCloseTo(Math.sqrt(0.005), within(1e-5));
     assertThat(robot.pose().getRotation().getRadians())
@@ -299,6 +328,38 @@ class PoseEstimatorTest {
     assertSame(late.pose(), onTime.pose(), 1e-9);
     assertThat(late.estimate().covariance().xx())
         .isCloseTo(onTime.estimate().covariance().xx(), within(1e-12));
+  }
+
+  /**
+   * Odometry faster than a robot's usual 250 steps a second (a burst from the drivetrain's thread)
+   * grows the history, whose oldest step by then sits part way along its ring. A measurement that
+   * arrives late, from before the growth, replays the steps kept on both sides of it, and lands as
+   * it would have on time; and the robot ends where the same drive at 250 steps a second puts it.
+   */
+  @Test
+  void aLateMeasurementReplaysThroughAHistoryThatGrew() {
+    long captured = T0 + 2_200_000_000L;
+    Pose2d[] late = new Pose2d[2];
+    int[] rates = {250, 600};
+    for (int k = 0; k < rates.length; k++) {
+      int rate = rates[k];
+      Robot onTime = new Robot().driveFor(2.0, 250, 1.0, 0, 0.3).driveFor(0.2, rate, 1.0, 0, 0.3);
+      Pose2d seen = onTime.pose().plus(new Transform2d(0.05, 0.05, Rotation2d.ZERO));
+      assertThat(onTime.see(seen, captured, position(0.05)))
+          .singleElement()
+          .satisfies(decision -> assertThat(decision.accepted()).isTrue());
+      onTime.driveFor(0.8, rate, 1.0, 0, 0.3);
+      Robot lateRobot =
+          new Robot().driveFor(2.0, 250, 1.0, 0, 0.3).driveFor(1.0, rate, 1.0, 0, 0.3);
+      lateRobot.see(seen, captured, position(0.05));
+
+      assertSame(lateRobot.pose(), onTime.pose(), 1e-9);
+      assertThat(lateRobot.estimate().covariance().xx())
+          .as("%d steps a second", rate)
+          .isCloseTo(onTime.estimate().covariance().xx(), within(1e-12));
+      late[k] = lateRobot.pose();
+    }
+    assertSame(late[1], late[0], 1e-3);
   }
 
   @Test
@@ -344,11 +405,11 @@ class PoseEstimatorTest {
     boolean aheadFirst = inOrder.see(ahead, earlier, position(0.05)).get(0).accepted();
     boolean behindSecond = inOrder.see(behind, later, position(0.05)).get(0).accepted();
     boolean behindFirst = reversed.see(behind, later, position(0.05)).get(0).accepted();
-    List<VisionDecision> lateArrival = reversed.see(ahead, earlier, position(0.05));
+    List<MeasurementVerdict> lateArrival = reversed.see(ahead, earlier, position(0.05));
 
     assertThat(List.of(aheadFirst, behindSecond, behindFirst)).containsExactly(true, false, true);
     assertThat(lateArrival)
-        .extracting(decision -> decision.measurement().pose(), VisionDecision::verdict)
+        .extracting(decision -> decision.measurement().pose(), MeasurementVerdict::verdict)
         .containsExactly(tuple(ahead, Verdict.ACCEPTED), tuple(behind, Verdict.GATED));
     assertThat(inOrder.pose().getX()).isGreaterThan(1.5);
     assertSame(reversed.pose(), inOrder.pose(), 1e-9);
@@ -360,12 +421,12 @@ class PoseEstimatorTest {
   void aMeasurementFarOutsideTheUncertaintyIsGatedOut() {
     Robot robot = new Robot().drive(10, 0, 0, 0);
 
-    List<VisionDecision> decisions =
+    List<MeasurementVerdict> decisions =
         robot.see(new Pose2d(3, 1, Rotation2d.ZERO), robot.time, position(0.05));
 
-    VisionDecision decision = decisions.get(0);
+    MeasurementVerdict decision = decisions.get(0);
     assertThat(decision.accepted()).isFalse();
-    assertThat(decision.reason()).startsWith("gate: ").endsWith("> 13.8");
+    assertThat(decision.described()).startsWith("gate: ").endsWith("> 13.8");
     assertThat(decision.innovationMeters()).isCloseTo(2.0, within(1e-9));
     assertSame(robot.pose(), START, 1e-9);
   }
@@ -383,22 +444,22 @@ class PoseEstimatorTest {
     // infinity: not a number.
     PoseCovariance noSpread = new PoseCovariance(1e200, 1e200, 1e200, Double.POSITIVE_INFINITY);
 
-    List<VisionDecision> first =
+    List<MeasurementVerdict> first =
         robot.see(new Pose2d(1.02, 1, Rotation2d.ZERO), robot.time, noSpread);
     robot.drive(5, 0, 0, 0);
-    List<VisionDecision> second =
+    List<MeasurementVerdict> second =
         robot.see(new Pose2d(3, 1, Rotation2d.ZERO), robot.time, noSpread);
     Pose2d after = robot.pose();
     LocalizationEstimate.Mode afterTwo = robot.estimate().mode();
-    List<VisionDecision> good =
+    List<MeasurementVerdict> good =
         robot.see(new Pose2d(1.02, 1, Rotation2d.ZERO), robot.time, position(0.05));
 
     assertThat(first).hasSize(1);
     assertThat(second).hasSize(1);
-    for (VisionDecision decision : List.of(first.get(0), second.get(0))) {
+    for (MeasurementVerdict decision : List.of(first.get(0), second.get(0))) {
       assertThat(decision.verdict()).isEqualTo(Verdict.NOT_COMPARABLE);
       assertThat(decision.accepted()).isFalse();
-      assertThat(decision.reason())
+      assertThat(decision.described())
           .isEqualTo(
               "can't be compared with the estimate: its uncertainty leaves no spread to measure"
                   + " in");
@@ -421,15 +482,16 @@ class PoseEstimatorTest {
     Robot robot = new Robot().drive(500, 0, 0, 0); // 2 s: the history keeps 1.5 s
     long now = robot.time;
 
-    assertThat(robot.see(START, T0 + STEP, position(0.05)).get(0).reason())
+    assertThat(robot.see(START, T0 + STEP, position(0.05)).get(0).described())
         .isEqualTo("too late: older than the history kept");
-    assertThat(robot.see(START, now + 100_000_000L, position(0.05)).get(0).reason())
+    assertThat(robot.see(START, now + 100_000_000L, position(0.05)).get(0).described())
         .isEqualTo("from the future: after the newest odometry");
-    assertThat(robot.see(new Pose2d(-1, 1, Rotation2d.ZERO), now, position(0.05)).get(0).reason())
+    assertThat(
+            robot.see(new Pose2d(-1, 1, Rotation2d.ZERO), now, position(0.05)).get(0).described())
         .isEqualTo("off the field");
     robot.estimator.reset(new PoseReset(now, START, PLACED, "placed again"));
     robot.drive(5, 0, 0, 0);
-    assertThat(robot.see(START, now, position(0.05)).get(0).reason())
+    assertThat(robot.see(START, now, position(0.05)).get(0).described())
         .isEqualTo("before the robot was last placed or recovered");
     assertThat(robot.estimate().health().rejected()).isEqualTo(4);
   }
@@ -438,7 +500,7 @@ class PoseEstimatorTest {
   void aMeasurementBeforeOdometryStartsIsRejected() {
     PoseEstimator estimator =
         new PoseEstimator(
-            EstimatorConfig.DEFAULTS,
+            EstimatorConfig.defaults(),
             point -> true,
             TAGS,
             new PoseReset(0, START, PLACED, "start"));
@@ -453,7 +515,7 @@ class PoseEstimatorTest {
             List.of(1),
             VisionMeasurement.Solver.MULTI_TAG));
 
-    assertThat(estimator.update().get(0).reason()).isEqualTo("before odometry started");
+    assertThat(estimator.update().get(0).described()).isEqualTo("before odometry started");
     assertThat(estimator.estimate().mode()).isEqualTo(LocalizationEstimate.Mode.INITIALIZING);
   }
 
@@ -477,6 +539,40 @@ class PoseEstimatorTest {
     assertThat(robot.estimate().mode()).isEqualTo(LocalizationEstimate.Mode.TRACKING);
     assertThat(robot.estimate().health().recoveries()).isEqualTo(1);
     assertThat(robot.estimate().covariance().xStdDev()).isCloseTo(0.25, within(1e-9));
+  }
+
+  /**
+   * What the estimator did is said, for the log: the recovery above moved the estimate a meter on
+   * three rejected images, which one camera of one tag could vouch for only because the placement
+   * was a person's word. The pose the wheels and the gyro alone give stays where they put it, and a
+   * driver's heading reset is counted, turns that pose too, and leaves the heading in doubt.
+   */
+  @Test
+  void whatTheEstimatorDidIsSaid() {
+    Robot robot = new Robot().drive(10, 0, 0, 0);
+    Pose2d truth = new Pose2d(1, 2, Rotation2d.ZERO);
+    assertThat(robot.estimator.lastRecovery()).isEmpty();
+
+    for (int image = 0; image < 3; image++) {
+      robot.drive(10, 0, 0, 0).see(truth, robot.time, position(0.05));
+    }
+
+    assertThat(robot.estimator.lastRecovery())
+        .map(Recovered::describe)
+        .hasValue("moved 1.00 m on 3 rejected measurements after a placement no camera had backed");
+    OdometryOnly wheels = robot.estimator.odometryOnly();
+    assertThat(new Translation2d(wheels.xMeters(), wheels.yMeters()))
+        .as("where the wheels alone put it")
+        .isEqualTo(START.getTranslation());
+    assertThat(robot.estimator.headingResets()).isZero();
+
+    robot.estimator.resetHeading(Rotation2d.fromDegrees(90), Math.toRadians(2));
+    robot.drive(10, 1, 0, 0);
+
+    assertThat(robot.estimator.headingResets()).isEqualTo(1);
+    assertThat(robot.estimator.headingInDoubt()).isTrue();
+    assertThat(wheels.headingRadians()).isCloseTo(Math.PI / 2, within(1e-9));
+    assertThat(wheels.yMeters()).as("driven forward, facing up the field").isGreaterThan(1.0);
   }
 
   /**
@@ -603,18 +699,18 @@ class PoseEstimatorTest {
    */
   @Test
   void aPositionFixNeverTurnsTheHeadingWhereOnlyHeadingsMay() {
-    EstimatorConfig headingsOnly =
-        EstimatorConfigBuilder.builder(TEXTBOOK)
-            .headingCorrection(EstimatorConfig.HeadingCorrection.HEADING_MEASUREMENTS)
-            .build();
-    Robot robot = new Robot(headingsOnly, new PoseReset(0, START, PLACED, "start"));
+    Robot robot =
+        new Robot(
+            TEXTBOOK,
+            HeadingCorrection.HEADING_MEASUREMENTS,
+            new PoseReset(0, START, PLACED, "start"));
     robot.estimator.reset(new PoseReset(T0, START, PLACED, "placed"));
     robot.drive(500, 1.0, 0, 0); // 2 m ahead, the heading unsure by 0.02 rad
     Rotation2d heading = robot.pose().getRotation();
     double headingStdDev = robot.estimate().covariance().headingStdDev();
 
     Pose2d aside = new Pose2d(robot.pose().getX(), robot.pose().getY() + 0.05, Rotation2d.ZERO);
-    VisionDecision decision = robot.seeLeaning(aside, new Translation2d(2, 1), 0.03);
+    MeasurementVerdict decision = robot.seeLeaning(aside, new Translation2d(2, 1), 0.03);
 
     assertThat(decision.accepted()).isTrue();
     assertThat(robot.pose().getY()).as("the position moved").isGreaterThan(START.getY() + 0.01);
@@ -653,13 +749,12 @@ class PoseEstimatorTest {
   @Test
   void aCamerasMountDoubtCanRaiseWhatItRepeats() {
     double[] alongTheTags = new double[2];
-    EstimatorConfig.HeadingCorrection[] ways = {
-      EstimatorConfig.HeadingCorrection.HEADING_MEASUREMENTS,
-      EstimatorConfig.HeadingCorrection.HEADING_MEASUREMENTS_AND_MOUNT_DOUBT
+    HeadingCorrection[] ways = {
+      HeadingCorrection.HEADING_MEASUREMENTS, HeadingCorrection.HEADING_MEASUREMENTS_AND_MOUNT_DOUBT
     };
     for (int way = 0; way < 2; way++) {
       PoseReset rough = new PoseReset(T0, START, PoseCovariance.fromStdDevs(1, 1, 0.02), "rough");
-      Robot robot = new Robot(with().headingCorrection(ways[way]).build(), rough);
+      Robot robot = new Robot(with().build(), ways[way], rough);
       robot.estimator.reset(rough);
       robot.drive(1, 0, 0, 0);
       robot.estimator.mountDoubt("front", 0.05, 2); // doubted before its first fix
@@ -674,8 +769,8 @@ class PoseEstimatorTest {
     // Along its tag: its shift and the tag's placement, and the doubt with them.
     double repeated =
         Math.hypot(
-            EstimatorConfig.DEFAULTS.cameraShiftStdDevMeters(),
-            EstimatorConfig.DEFAULTS.tagPlacementStdDevMeters());
+            EstimatorConfig.defaults().cameraShiftStdDevMeters(),
+            EstimatorConfig.defaults().tagPlacementStdDevMeters());
     assertThat(alongTheTags[0]).as("the doubt ignored").isCloseTo(repeated, within(0.1 * repeated));
     double doubted = Math.hypot(repeated, 0.05);
     assertThat(alongTheTags[1]).as("the doubt added").isCloseTo(doubted, within(0.1 * doubted));
@@ -683,9 +778,11 @@ class PoseEstimatorTest {
 
   @Test
   void aMeasurementWithHeadingCorrectsTheGyroOffset() {
-    Robot robot = new Robot(TEXTBOOK, new PoseReset(0, START, PLACED, "x"));
-    robot.estimator.reset(
-        new PoseReset(T0, START, PoseCovariance.fromStdDevs(0.05, 0.05, 0.1), "x"));
+    // Started there, not placed: a placement's heading would be a person's word, which a camera's
+    // heading 5.7° away counts against instead of correcting.
+    Robot robot =
+        new Robot(
+            TEXTBOOK, new PoseReset(0, START, PoseCovariance.fromStdDevs(0.05, 0.05, 0.1), "x"));
     robot.drive(1, 0, 0, 0);
 
     robot.see(
@@ -704,7 +801,7 @@ class PoseEstimatorTest {
   void modesFollowWhatTheEstimateRestsOn() {
     PoseEstimator estimator =
         new PoseEstimator(
-            EstimatorConfig.DEFAULTS,
+            EstimatorConfig.defaults(),
             point -> true,
             TAGS,
             new PoseReset(0, START, PoseCovariance.fromStdDevs(10, 10, 3), "unknown"));
@@ -1010,7 +1107,7 @@ class PoseEstimatorTest {
   void aHeadingResetBeforeOdometryStartsIsKept() {
     PoseEstimator estimator =
         new PoseEstimator(
-            EstimatorConfig.DEFAULTS,
+            EstimatorConfig.defaults(),
             point -> true,
             TAGS,
             new PoseReset(0, START, PLACED, "start"));
@@ -1021,7 +1118,67 @@ class PoseEstimatorTest {
     assertThat(estimator.pose().getRotation().getDegrees()).isCloseTo(180, within(1e-9));
     assertThat(estimator.pose().getTranslation()).isEqualTo(START.getTranslation());
     assertThatThrownBy(() -> estimator.resetHeading(Rotation2d.ZERO, 0))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("a heading reset's uncertainty: 0.0");
+  }
+
+  /** Who says which way the robot faces: a placement, or a driver's heading reset. */
+  enum Word {
+    PLACEMENT,
+    RESET
+  }
+
+  /**
+   * A person says which way the robot faces, and it really faces this far from that.
+   *
+   * @param word who says
+   * @param offDegrees how far the robot really faces from what was said
+   * @param doubt whose word the heading rests on until a camera backs it
+   * @param recoveries how many recoveries the cameras' own headings make
+   */
+  record PersonsWord(Word word, double offDegrees, HeadingDoubt doubt, int recoveries) {}
+
+  static Stream<PersonsWord> personsWords() {
+    return Stream.of(
+        new PersonsWord(Word.PLACEMENT, 0, HeadingDoubt.PLACEMENT, 0),
+        new PersonsWord(Word.PLACEMENT, 30, HeadingDoubt.PLACEMENT, 1),
+        new PersonsWord(Word.PLACEMENT, 180, HeadingDoubt.PLACEMENT, 1),
+        new PersonsWord(Word.RESET, 0, HeadingDoubt.RESET, 0),
+        new PersonsWord(Word.RESET, 30, HeadingDoubt.RESET, 1),
+        new PersonsWord(Word.RESET, 180, HeadingDoubt.RESET, 1));
+  }
+
+  /**
+   * A heading a person gives, a placement's or a driver's reset, is in doubt until a camera's own
+   * heading backs it. A camera that agrees backs it at once. Robots set down 30° off, or backwards,
+   * are turned to where one camera's headings say, three of them agreeing: the person's word, which
+   * nothing yet backs, is what lets one camera's word move the estimate.
+   */
+  @ParameterizedTest
+  @MethodSource("personsWords")
+  void aPersonsHeadingIsInDoubtUntilACameraBacksIt(PersonsWord row) {
+    Robot robot = new Robot().drive(10, 0, 0, 0);
+    robot.seeWithHeading(START);
+    assertThat(robot.estimator.headingDoubt())
+        .as("backed before the word")
+        .isEqualTo(HeadingDoubt.NONE);
+    robot.drive(8, 0, 0, 0);
+    Pose2d here = robot.pose();
+    if (row.word() == Word.PLACEMENT) {
+      robot.estimator.reset(new PoseReset(robot.time, here, PLACED, "placed again"));
+    } else {
+      robot.estimator.resetHeading(here.getRotation(), Math.toRadians(2));
+    }
+    assertThat(robot.estimator.headingDoubt()).isEqualTo(row.doubt());
+    assertThat(robot.estimator.headingInDoubt()).isTrue();
+    Rotation2d facing = here.getRotation().plus(Rotation2d.fromDegrees(row.offDegrees()));
+
+    for (int image = 0; image < 3; image++) {
+      robot.drive(8, 0, 0, 0).seeWithHeading(new Pose2d(here.getTranslation(), facing));
+    }
+
+    assertThat(robot.estimator.headingDoubt()).as("backed").isEqualTo(HeadingDoubt.NONE);
+    assertThat(robot.pose().getRotation().minus(facing).getDegrees()).isCloseTo(0, within(1.0));
+    assertThat(robot.estimate().health().recoveries()).isEqualTo(row.recoveries());
   }
 
   @Test
@@ -1042,6 +1199,38 @@ class PoseEstimatorTest {
     assertThat(recovered.getRotation().getDegrees()).isCloseTo(90, within(1e-6));
     assertThat(robot.estimate().health().recoveries()).isEqualTo(1);
     assertThat(afterwards).as("the next one, taken").isTrue();
+  }
+
+  /**
+   * A heading recovery keeps the books as they were, where a position recovery keeps them anew: the
+   * robot was placed facing backwards and 5 m from where it is. One camera's three headings turn
+   * it, which leaves its position as unsure as a lost one's, so the estimate is dead reckoning, not
+   * tracking tags. The placement is still unbacked, so the same camera's positions, from one tag,
+   * then move it: had the turn counted as resting on that camera, they could not.
+   */
+  @Test
+  void aHeadingRecoveryLeavesThePositionToTheImagesAfterIt() {
+    Robot robot = new Robot().drive(10, 0, 0, 0);
+    Pose2d truth = new Pose2d(6, 1, Rotation2d.k180deg);
+
+    for (int image = 0; image < 3; image++) {
+      robot
+          .drive(8, 0, 0, 0)
+          .seeWithHeading(new Pose2d(START.getTranslation(), truth.getRotation()));
+    }
+    LocalizationEstimate turned = robot.estimate();
+    for (int image = 0; image < 3; image++) {
+      robot.drive(8, 0, 0, 0).seeFrom("front", truth);
+    }
+
+    assertThat(turned.pose().getRotation().getDegrees()).isCloseTo(180, within(1e-6));
+    assertThat(turned.health().recoveries()).isEqualTo(1);
+    assertThat(turned.mode()).isEqualTo(LocalizationEstimate.Mode.DEAD_RECKONING);
+    assertThat(robot.estimator.lastRecovery())
+        .map(Recovered::describe)
+        .hasValue("moved 5.00 m on 3 rejected measurements after a placement no camera had backed");
+    assertSame(robot.pose(), truth, 0.05);
+    assertThat(robot.estimate().mode()).isEqualTo(LocalizationEstimate.Mode.TRACKING);
   }
 
   @Test
@@ -1092,7 +1281,7 @@ class PoseEstimatorTest {
       robot.drive(8, 0, 0, 0).seeWithHeading(START);
     }
     Pose2d turnedBack = robot.pose();
-    VisionDecision solvedFacingRight =
+    MeasurementVerdict solvedFacingRight =
         robot.drive(8, 0, 0, 0).seeLeaning(START, new Translation2d(3, 0), 0.05);
 
     assertThat(leaning).containsExactly(false, false, false);
@@ -1169,6 +1358,8 @@ class PoseEstimatorTest {
         .hasMessage("EstimatorConfig.translationStdDevPerMeter: -1 must be zero or more");
     assertThatThrownBy(() -> with().historySeconds(0).build())
         .hasMessage("EstimatorConfig.historySeconds: 0 must be positive");
+    assertThatThrownBy(() -> with().historySeconds(3600).build())
+        .hasMessage("EstimatorConfig.historySeconds: 3600 must be at most 5");
     assertThatThrownBy(() -> with().recoveryMeasurements(1).build())
         .hasMessage("EstimatorConfig.recoveryMeasurements: 1 must be at least 2");
     assertThatThrownBy(() -> with().tiltStartDegrees(30).build())
@@ -1202,7 +1393,7 @@ class PoseEstimatorTest {
   void aMeasurementThatIsntANumberIsRejected() {
     Robot robot = new Robot().drive(25, 0, 0, 0);
 
-    List<VisionDecision> decisions =
+    List<MeasurementVerdict> decisions =
         robot.see(
             new Pose2d(Double.NaN, Double.NaN, Rotation2d.ZERO),
             robot.time,
@@ -1213,22 +1404,27 @@ class PoseEstimatorTest {
   }
 
   private static EstimatorConfigBuilder with() {
-    return EstimatorConfigBuilder.builder(EstimatorConfig.DEFAULTS);
+    return EstimatorConfigBuilder.builder(EstimatorConfig.defaults());
+  }
+
+  /** One row of the mode's facts, and the mode they make. */
+  record ModeRow(ModeFacts facts, LocalizationEstimate.Mode mode) {}
+
+  static Stream<ModeRow> modes() {
+    return Stream.of(
+        new ModeRow(new ModeFacts(false, false, true, true), LocalizationEstimate.Mode.IMU_FAULT),
+        new ModeRow(new ModeFacts(true, false, true, true), LocalizationEstimate.Mode.INITIALIZING),
+        new ModeRow(new ModeFacts(true, true, true, true), LocalizationEstimate.Mode.LOST),
+        new ModeRow(new ModeFacts(true, true, false, true), LocalizationEstimate.Mode.TRACKING),
+        new ModeRow(
+            new ModeFacts(true, true, false, false), LocalizationEstimate.Mode.DEAD_RECKONING));
   }
 
   /** What the estimate rests on, in order: each state overrides the ones after it. */
-  @Test
-  void theModeIsTheFirstThatApplies() {
-    assertThat(PoseEstimator.mode(false, false, true, true))
-        .isEqualTo(LocalizationEstimate.Mode.IMU_FAULT);
-    assertThat(PoseEstimator.mode(true, false, true, true))
-        .isEqualTo(LocalizationEstimate.Mode.INITIALIZING);
-    assertThat(PoseEstimator.mode(true, true, true, true))
-        .isEqualTo(LocalizationEstimate.Mode.LOST);
-    assertThat(PoseEstimator.mode(true, true, false, true))
-        .isEqualTo(LocalizationEstimate.Mode.TRACKING);
-    assertThat(PoseEstimator.mode(true, true, false, false))
-        .isEqualTo(LocalizationEstimate.Mode.DEAD_RECKONING);
+  @ParameterizedTest
+  @MethodSource("modes")
+  void theModeIsTheFirstThatApplies(ModeRow row) {
+    assertThat(row.facts().mode()).isEqualTo(row.mode());
   }
 
   /**
@@ -1246,7 +1442,10 @@ class PoseEstimatorTest {
     for (int which = 0; which < 2; which++) {
       PoseEstimator estimator =
           new PoseEstimator(
-              EstimatorConfig.DEFAULTS, point -> true, forty, new PoseReset(0, START, PLACED, "x"));
+              EstimatorConfig.defaults(),
+              point -> true,
+              forty,
+              new PoseReset(0, START, PLACED, "x"));
       long time = T0;
       estimator.addOdometry(time, new BodyMotion(0, 0, 0, 0), 0, YawSource.GYRO);
       estimator.reset(new PoseReset(time, START, PLACED, "placed"));
@@ -1268,8 +1467,8 @@ class PoseEstimatorTest {
       withoutPlaces.add(estimator.tagsWithoutPlaces());
     }
 
-    double tag = EstimatorConfig.DEFAULTS.tagPlacementStdDevMeters();
-    double shift = EstimatorConfig.DEFAULTS.cameraShiftStdDevMeters();
+    double tag = EstimatorConfig.defaults().tagPlacementStdDevMeters();
+    double shift = EstimatorConfig.defaults().cameraShiftStdDevMeters();
     double shared = Math.hypot(tag, shift / Math.sqrt(2));
     assertThat(alongTheTag[0]).as("tag 40, kept apart").isCloseTo(shared, within(0.05 * shared));
     assertThat(withoutPlaces.get(0)).isEmpty();

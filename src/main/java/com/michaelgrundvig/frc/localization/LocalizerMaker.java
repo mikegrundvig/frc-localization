@@ -8,7 +8,7 @@ import com.michaelgrundvig.frc.world.robot.RobotDefinition;
  * to choose its localizer, in the robot's block:
  *
  * <pre>{@code
- * .localizer(WpilibLocalizer::new)
+ * .withLocalizer(WpilibLocalizer::new)
  * }</pre>
  *
  * <p>A robot that names none gets the {@link DefaultLocalizer}, weighing its sources as the

@@ -62,7 +62,7 @@ class YawSamplesTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("3 readings counted, of 2 times and 3 yaws");
     assertThatThrownBy(() -> YawSamples.handedOver(times, yaws, -1))
-        .isInstanceOf(IllegalArgumentException.class);
+        .hasMessage("-1 readings counted, of 3 times and 2 yaws");
   }
 
   private static long[] yawsLong(int length) {

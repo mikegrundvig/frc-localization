@@ -1,5 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
+import java.util.Arrays;
+
 /**
  * Whether one camera's measurements keep landing to one side of where the other cameras' land: the
  * estimator's own, quick watch on each camera's mount.
@@ -187,10 +189,10 @@ final class CameraWatch {
           "judge a camera by at least " + (int) (2 * FEWEST_TO_JUDGE) + " measurements: " + memory);
     }
     kept = 1 - 1.0 / memory;
-    java.util.Arrays.fill(allowedTurnVariance, allowedTurnStdDevRadians * allowedTurnStdDevRadians);
+    Arrays.fill(allowedTurnVariance, allowedTurnStdDevRadians * allowedTurnStdDevRadians);
     allowedShiftVariance = allowedShiftStdDevMeters * allowedShiftStdDevMeters;
     allowedLateVariance = allowedLateStdDevSeconds * allowedLateStdDevSeconds;
-    java.util.Arrays.fill(heardNanos, Long.MIN_VALUE / 2);
+    Arrays.fill(heardNanos, Long.MIN_VALUE / 2);
   }
 
   /**

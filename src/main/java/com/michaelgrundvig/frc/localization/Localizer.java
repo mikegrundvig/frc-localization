@@ -128,7 +128,7 @@ import org.wpilib.math.kinematics.ChassisVelocities;
  *   <li><b>L20.</b> {@link #mode} is what the pose rests on, and {@link #health} the numbers behind
  *       it. A pose that rests on the cameras says {@link LocalizationEstimate.Mode#TRACKING} only
  *       while a measurement was used lately.
- *   <li><b>L21.</b> {@link #decisions} has one decision for each measurement the last {@link
+ *   <li><b>L21.</b> {@link #verdicts} has one verdict for each measurement the last {@link
  *       #measurements} was given, each naming its measurement.
  *   <li><b>L22.</b> {@link #fieldVelocities} is how the robot moves over the field, in the field's
  *       frame: zero for a robot that stands still.
@@ -226,7 +226,7 @@ public interface Localizer {
    * The heading to solve an image taken at a moment with, or empty when the image should be solved
    * without one. By default it is the heading of {@link #poseAt}. Override it to answer empty while
    * the localizer would not stake an image on its heading: the default localizer does after a
-   * driver's heading reset, until a camera has backed the new heading.
+   * placement and after a driver's heading reset, until a camera has backed the heading.
    *
    * <p>A heading is leaned on only while {@link #covariance} says it is sure. A localizer that
    * reports no covariance has every image solved without its heading.
@@ -268,7 +268,7 @@ public interface Localizer {
    * the pit's page and the World view say the measurements were given to the localizer, and not
    * what it did with them, and no camera's mount is checked against the pose.
    */
-  default Optional<List<VisionDecision>> decisions() {
+  default Optional<List<MeasurementVerdict>> verdicts() {
     return Optional.empty();
   }
 

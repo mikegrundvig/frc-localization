@@ -31,6 +31,14 @@ class VerdictTest {
         Verdict.GATED,
         new Before(
             45.24, 13.8155, String.format(Locale.ROOT, "gate: %.1f > %.1f", 45.24, 13.8155)));
+    // Added on purpose, 2026-11-10: a placement's heading is a person's word, and a camera's that
+    // disagrees with it counts against it until one backs it.
+    BEFORE.put(
+        Verdict.HEADING_UNBACKED,
+        new Before(
+            9.2,
+            16.3,
+            "its heading disagrees with one a person gave, which no camera has backed yet"));
     BEFORE.put(Verdict.OFF_FIELD, new Before(Double.NaN, Double.NaN, "off the field"));
     // Added on purpose, 2026-10-11: before it, such a measurement left the estimator with no reason
     // at all.
@@ -53,18 +61,46 @@ class VerdictTest {
     // The pipeline adds which tags the task trusts: "no tags this task trusts (Hub: 10)".
     BEFORE.put(
         Verdict.UNTRUSTED_TAGS, new Before(Double.NaN, Double.NaN, "no tags this task trusts"));
+    // Changed on purpose, 2026-11-09: "no tags from this field's layout" said three causes in one,
+    // and pointed at the venue. Nothing in view, tags Visor couldn't solve (no lens calibration, or
+    // seen edge-on) and tags off the layout are each their own, and the pipeline names the tags.
+    BEFORE.put(Verdict.NO_TAGS, new Before(Double.NaN, Double.NaN, "saw no tags"));
+    BEFORE.put(
+        Verdict.NO_LENS,
+        new Before(
+            Double.NaN,
+            Double.NaN,
+            "no lens calibration: Visor sends corners and no poses without one (docs/visor.md)"));
+    BEFORE.put(
+        Verdict.UNSOLVED_TAGS,
+        new Before(Double.NaN, Double.NaN, "tags seen too edge-on or too small to solve"));
     BEFORE.put(
         Verdict.UNKNOWN_TAGS,
-        new Before(Double.NaN, Double.NaN, "no tags from this field's layout"));
+        new Before(Double.NaN, Double.NaN, "tags not in this field's layout"));
     BEFORE.put(
         Verdict.TAG_NOT_A_NUMBER,
         new Before(Double.NaN, Double.NaN, "a tag's pose from the camera isn't a number"));
+    // Changed on purpose, 2026-11-09: both say their limit now, as "ambiguous" always did.
     BEFORE.put(
         Verdict.TURNING,
-        new Before(6.04, 4.0, String.format(Locale.ROOT, "turning too fast: %.1f rad/s", 6.04)));
+        new Before(
+            6.04,
+            4.0,
+            String.format(Locale.ROOT, "turning too fast: %.1f rad/s > %.1f rad/s", 6.04, 4.0)));
     BEFORE.put(
         Verdict.TOO_FAR,
-        new Before(5.06, 4.5, String.format(Locale.ROOT, "too far: %.1f m", 5.06)));
+        new Before(5.06, 4.5, String.format(Locale.ROOT, "too far: %.1f m > %.1f m", 5.06, 4.5)));
+    // Added on purpose, 2026-11-09: before them, tags at no distance became a near-perfect fix, and
+    // a motion that wasn't a number threw out of the robot loop.
+    BEFORE.put(
+        Verdict.TOO_CLOSE,
+        new Before(0.0, 0.1, String.format(Locale.ROOT, "too close: %.2f m < %.2f m", 0.0, 0.1)));
+    BEFORE.put(
+        Verdict.MOTION_NOT_A_NUMBER,
+        new Before(
+            Double.NaN,
+            Double.NaN,
+            "the robot's speed or turn rate as the image was taken isn't a number"));
     BEFORE.put(
         Verdict.AMBIGUOUS,
         new Before(
@@ -83,6 +119,19 @@ class VerdictTest {
         Verdict.CALIBRATING,
         new Before(Double.NaN, Double.NaN, "withheld while calibrating this camera"));
     BEFORE.put(Verdict.HELD, new Before(Double.NaN, Double.NaN, "held, autonomous just started"));
+    // Added on purpose, 2026-11-09: the robot's own reasons to leave an image out, which before
+    // were only words in the camera's log, and were counted nowhere.
+    BEFORE.put(Verdict.TURNED_OFF, new Before(Double.NaN, Double.NaN, "camera turned off"));
+    BEFORE.put(Verdict.SEEN_BEFORE, new Before(Double.NaN, Double.NaN, "the same image again"));
+    BEFORE.put(
+        Verdict.OUT_OF_STEP,
+        new Before(Double.NaN, Double.NaN, "arrived out of step with its capture time"));
+    BEFORE.put(
+        Verdict.NO_CAPTURE_TIME,
+        new Before(Double.NaN, Double.NaN, "arrived without a capture time"));
+    BEFORE.put(
+        Verdict.UNREADABLE,
+        new Before(Double.NaN, Double.NaN, "the camera's data for it couldn't be read"));
     // Added with the localizer seam, on purpose: a localizer that doesn't report its decisions.
     BEFORE.put(
         Verdict.GIVEN,
@@ -140,12 +189,13 @@ class VerdictTest {
             "front",
             List.of(7),
             VisionMeasurement.Solver.SINGLE_TAG);
-    VisionDecision gated = new VisionDecision(measurement, Verdict.GATED, 0.8, 45.2, 13.8);
-    VisionDecision accepted = new VisionDecision(measurement, Verdict.ACCEPTED, 0.01, 0.2, 13.8);
+    MeasurementVerdict gated = new MeasurementVerdict(measurement, Verdict.GATED, 0.8, 45.2, 13.8);
+    MeasurementVerdict accepted =
+        new MeasurementVerdict(measurement, Verdict.ACCEPTED, 0.01, 0.2, 13.8);
 
     assertThat(gated.accepted()).isFalse();
-    assertThat(gated.reason()).isEqualTo("gate: 45.2 > 13.8");
+    assertThat(gated.described()).isEqualTo("gate: 45.2 > 13.8");
     assertThat(accepted.accepted()).isTrue();
-    assertThat(accepted.reason()).isEqualTo("accepted");
+    assertThat(accepted.described()).isEqualTo("accepted");
   }
 }

@@ -60,6 +60,7 @@ public record LocalizationEstimate(
    * @param gyroConnected whether an IMU turned the newest step: the gyro, or the backup IMU while
    *     the gyro is lost. False only when neither did, and the wheels turned it.
    */
+  @OutputRecord
   public record Health(
       double visionAgeSeconds,
       int accepted,
@@ -71,7 +72,12 @@ public record LocalizationEstimate(
       double tiltRadians,
       boolean collisionActive,
       int recoveries,
-      boolean gyroConnected) {}
+      boolean gyroConnected) {
+    /** Builds one by name. */
+    public static LocalizationEstimateHealthBuilder builder() {
+      return LocalizationEstimateHealthBuilder.builder();
+    }
+  }
 
   /**
    * Where the robot will be after some time at its current velocity and turn rate: for acting

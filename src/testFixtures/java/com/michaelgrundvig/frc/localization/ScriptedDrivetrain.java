@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
 import com.michaelgrundvig.frc.world.field.Bump;
+import com.michaelgrundvig.frc.world.robot.RobotMath;
 import java.util.ArrayList;
 import java.util.List;
 import org.jspecify.annotations.Nullable;
@@ -58,6 +59,12 @@ final class ScriptedDrivetrain {
   void gyroRestarts() {
     gyroYaw = 0;
   }
+
+  /**
+   * How far the wheels read for each meter they roll: 1.01 for wheels a percent smaller than the
+   * robot is told, so odometry runs a percent long.
+   */
+  double wheelScale = 1;
 
   /** The robot tilted by hand, nose down and left side up, beyond any bump. */
   double pitch;
@@ -124,7 +131,7 @@ final class ScriptedDrivetrain {
         if (speed > 1e-9) {
           angles[i] = Math.atan2(vy, vx);
         }
-        distances[i] += speed * SAMPLE_SECONDS;
+        distances[i] += speed * SAMPLE_SECONDS * wheelScale;
       }
       truth =
           truth.plus(
@@ -175,9 +182,8 @@ final class ScriptedDrivetrain {
         .pitchRadians(pitch)
         .rollRadians(roll)
         // What it felt, and gravity's share as the robot tilts.
-        .forwardAccelerationMetersPerSecSq(forward - ImuReadings.STANDARD_GRAVITY * Math.sin(pitch))
-        .leftAccelerationMetersPerSecSq(
-            left + ImuReadings.STANDARD_GRAVITY * Math.sin(roll) * Math.cos(pitch))
+        .forwardAccelerationMetersPerSecSq(forward - RobotMath.GRAVITY * Math.sin(pitch))
+        .leftAccelerationMetersPerSecSq(left + RobotMath.GRAVITY * Math.sin(roll) * Math.cos(pitch))
         .yaws(
             YawSamples.of(
                 yawTimes.stream().mapToLong(Long::longValue).toArray(),

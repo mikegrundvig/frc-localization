@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.wpilib.math.geometry.Rotation2d;
 import org.wpilib.math.geometry.Translation2d;
@@ -77,19 +78,31 @@ class PoseCovarianceTest {
     assertThat(turned.xx() * turned.yy() - turned.xy() * turned.xy()).isCloseTo(0.0, within(1e-12));
   }
 
+  /** A spread that can't be one, and what the refusal says of it. */
+  private record Unreal(double xx, double xy, double yy, double heading, String message) {}
+
   @Test
   void onlyRealSpreadsAreAllowed() {
-    assertThatThrownBy(() -> new PoseCovariance(-0.1, 0, 0.1, 0))
-        .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> new PoseCovariance(Double.NaN, 0, 0.1, 0))
-        .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> new PoseCovariance(0.1, 0, Double.POSITIVE_INFINITY, 0))
-        .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> new PoseCovariance(0.01, 0.02, 0.01, 0))
-        .hasMessageContaining("more than their variances allow");
-    assertThatThrownBy(() -> new PoseCovariance(0.1, 0, 0.1, Double.NaN))
-        .hasMessageContaining("heading");
-    assertThatThrownBy(() -> new PoseCovariance(0.1, 0, 0.1, -1)).hasMessageContaining("heading");
+    String position = "the position variances must be finite, and zero or more: ";
+    String heading = "the heading variance must be zero or more (infinite when unknown): ";
+    List<Unreal> rows =
+        List.of(
+            new Unreal(-0.1, 0, 0.1, 0, position + "-0.1, 0.1"),
+            new Unreal(Double.NaN, 0, 0.1, 0, position + "NaN, 0.1"),
+            new Unreal(0.1, 0, Double.POSITIVE_INFINITY, 0, position + "0.1, Infinity"),
+            new Unreal(
+                0.01,
+                0.02,
+                0.01,
+                0,
+                "the covariance of x and y, 0.02, is more than their variances allow"),
+            new Unreal(0.1, 0, 0.1, Double.NaN, heading + "NaN"),
+            new Unreal(0.1, 0, 0.1, -1, heading + "-1.0"));
+    for (Unreal row : rows) {
+      assertThatThrownBy(() -> new PoseCovariance(row.xx(), row.xy(), row.yy(), row.heading()))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage(row.message());
+    }
   }
 
   /** 99.9% of a two-dimensional normal error lies within 3.72 of its standard deviations. */
@@ -131,8 +144,10 @@ class PoseCovarianceTest {
   void anEllipseNeedsAProbability() {
     PoseCovariance covariance = PoseCovariance.fromStdDevs(0.1, 0.1, 0.01);
 
-    assertThatThrownBy(() -> covariance.ellipse(1)).isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> covariance.ellipse(0)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> covariance.ellipse(1))
+        .hasMessage("a probability above 0 and below 1: 1.0");
+    assertThatThrownBy(() -> covariance.ellipse(0))
+        .hasMessage("a probability above 0 and below 1: 0.0");
     assertThat(PoseCovariance.fromStdDevs(0, 0, 0).ellipse(0.5).major()).isZero();
   }
 }

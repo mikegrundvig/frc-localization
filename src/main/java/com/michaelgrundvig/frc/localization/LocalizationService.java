@@ -8,6 +8,7 @@ import com.michaelgrundvig.frc.world.robot.RobotDefinition;
 import com.michaelgrundvig.frc.world.robot.RobotMath;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,7 +71,7 @@ public final class LocalizationService {
   private final Terrain ground;
 
   /** The gyro and the backup IMU should turn alike. */
-  private final ImuCrossCheck crossCheck = new ImuCrossCheck(ImuCrossCheck.Settings.DEFAULTS);
+  private final ImuCrossCheck crossCheck = new ImuCrossCheck(ImuCrossCheck.Settings.defaults());
 
   /**
    * What the IMU that has readings this loop read: the gyro, the backup IMU while the gyro has
@@ -92,13 +93,19 @@ public final class LocalizationService {
   private VisionPipeline pipeline;
   private final Set<Integer> tagIds;
   private final Map<String, CameraConfig> cameras = new LinkedHashMap<>();
-  private VisionConfig vision = VisionConfig.DEFAULTS;
+  private VisionConfig vision = VisionConfig.defaults();
 
   /** What the robot last said of each camera's mount, by the camera's name. */
   private final Map<String, MountDoubt> mountDoubts = new HashMap<>();
 
   /** The images refused or held since the last update, before they became measurements. */
   private final List<FrameVerdict> refused = new ArrayList<>();
+
+  /**
+   * The tags the pipeline left out of each measurement made since the last update, by the
+   * measurement itself: the update says them beside what became of it.
+   */
+  private final Map<VisionMeasurement, List<TagVerdict>> leftOutOf = new IdentityHashMap<>();
 
   /** Half a second of the robot's attitude, for each image's capture time. */
   private final AttitudeHistory attitudes;
@@ -137,55 +144,6 @@ public final class LocalizationService {
       double speedMetersPerSecond,
       double recentYawRateRadiansPerSecond,
       double headingStdDevRadians) {}
-
-  /**
-   * Localization for a robot on a field, with the default localizer: its estimator starts with the
-   * robot not placed yet, so anywhere on the field, and the first camera measurement (or placing
-   * it) wins.
-   *
-   * @param field the field: its tags, which images are solved against; its terrain, which a tilt
-   *     the ground explains and a crest crossed come from; and its edges, past which no measurement
-   *     can put the robot
-   * @param robot what the robot is: its wheels, its IMUs, and its cameras' mounts
-   * @param kinematics how the drivetrain's wheels move the robot: {@link SwerveKinematicsModel} for
-   *     the robot's swerve modules
-   * @param config how the estimator weighs its sources
-   * @param loopSeconds how long one robot loop is
-   */
-  public LocalizationService(
-      FieldModel field,
-      RobotDefinition robot,
-      DriveKinematicsModel kinematics,
-      EstimatorConfig config,
-      double loopSeconds) {
-    this(field, robot, new DefaultLocalizer(field, robot, kinematics, config), loopSeconds);
-  }
-
-  /**
-   * Localization with the default localizer from its parts: an estimator already made (in a test,
-   * one that starts where the robot stands), and a terrain other than the field's own.
-   *
-   * @param estimator the pose estimator, which the localizer owns from now on
-   * @param kinematics how the drivetrain's wheels move the robot
-   * @param field the field whose tags images are solved against
-   * @param terrain the ground the robot drives on: a tilt it explains keeps the wheels trusted
-   * @param robot what the robot is: its wheels, its IMUs, and its cameras' mounts
-   * @param loopSeconds how long one robot loop is
-   */
-  public LocalizationService(
-      PoseEstimator estimator,
-      DriveKinematicsModel kinematics,
-      FieldModel field,
-      Terrain terrain,
-      RobotDefinition robot,
-      double loopSeconds) {
-    this(
-        field,
-        terrain,
-        robot,
-        new DefaultLocalizer(estimator, kinematics, terrain, robot),
-        loopSeconds);
-  }
 
   /**
    * Localization for a robot on a field, with the localizer the robot chose.
@@ -317,7 +275,7 @@ public final class LocalizationService {
 
   /**
    * How far the cameras' images are trusted, from the next image on: as committed, or as the pit
-   * tuned it. Until told, {@link VisionConfig#DEFAULTS}.
+   * tuned it. Until told, {@link VisionConfig#defaults()}.
    */
   public void vision(VisionConfig settings) {
     vision = settings;
@@ -337,7 +295,7 @@ public final class LocalizationService {
   }
 
   /** One camera image, from every tag it saw: see {@link #camera(TagDetections, TagAllowlist)}. */
-  public VisionResult camera(TagDetections frame) {
+  public ImageVerdict camera(TagDetections frame) {
     return camera(frame, null);
   }
 
@@ -351,15 +309,34 @@ public final class LocalizationService {
    *     frames, as it does what became of the measurement
    * @throws IllegalArgumentException if the robot's definition has no camera by the frame's name
    */
-  public VisionResult camera(TagDetections frame, @Nullable TagAllowlist onlyTags) {
-    VisionResult result = solve(frame, onlyTags);
+  public ImageVerdict camera(TagDetections frame, @Nullable TagAllowlist onlyTags) {
+    ImageVerdict result = solve(frame, onlyTags);
     VisionMeasurement measurement = result.measurement();
     if (measurement != null) {
       camera(measurement);
+      if (!result.leftOutTags().isEmpty()) {
+        leftOutOf.put(measurement, result.leftOutTags());
+      }
     } else {
       refused.add(FrameVerdict.refused(result));
     }
     return result;
+  }
+
+  /**
+   * An image the robot left out before it was solved: its camera turned off ({@link
+   * Verdict#TURNED_OFF}), the same image again ({@link Verdict#SEEN_BEFORE}), or one whose capture
+   * time is wrong ({@link Verdict#OUT_OF_STEP}). It is among the next update's frames, every tag it
+   * saw left out with it, so whatever counts what became of a camera's images counts it too.
+   */
+  public void leftOut(TagDetections frame, Verdict why) {
+    boolean theRobots =
+        why == Verdict.TURNED_OFF || why == Verdict.SEEN_BEFORE || why == Verdict.OUT_OF_STEP;
+    if (!theRobots) {
+      throw new IllegalArgumentException(
+          "the robot leaves an image out unsolved for its own reasons: " + why);
+    }
+    refused.add(FrameVerdict.leftOut(frame, why));
   }
 
   /**
@@ -370,23 +347,23 @@ public final class LocalizationService {
    * @param why why it's held: {@link Verdict#CALIBRATING} or {@link Verdict#HELD}
    * @return what the image made: a measurement, or why not, for the log
    */
-  public VisionResult hold(TagDetections frame, @Nullable TagAllowlist onlyTags, Verdict why) {
+  public ImageVerdict hold(TagDetections frame, @Nullable TagAllowlist onlyTags, Verdict why) {
     if (why != Verdict.CALIBRATING && why != Verdict.HELD) {
       throw new IllegalArgumentException(
           "the robot holds an image back for its own reasons: " + why);
     }
-    VisionResult result = solve(frame, onlyTags);
+    ImageVerdict result = solve(frame, onlyTags);
     boolean pipelineRefusedIt = result.measurement() == null;
     if (pipelineRefusedIt) {
       refused.add(FrameVerdict.refused(result));
     } else {
-      refused.add(FrameVerdict.held(frame, why));
+      refused.add(FrameVerdict.held(result, why));
     }
     return result;
   }
 
   /** What an image makes, solved as the robot was when it was taken: nothing is kept. */
-  private VisionResult solve(TagDetections frame, @Nullable TagAllowlist onlyTags) {
+  private ImageVerdict solve(TagDetections frame, @Nullable TagAllowlist onlyTags) {
     CameraConfig camera = cameras.get(frame.camera());
     if (camera == null) {
       throw new IllegalArgumentException(
@@ -400,7 +377,7 @@ public final class LocalizationService {
         mount(camera, frame.timestampNanos()),
         capture(frame.timestampNanos()),
         vision,
-        new VisionPipeline.Trust(mountDoubtMeters, onlyTags));
+        new VisionPipeline.Terms(mountDoubtMeters, onlyTags));
   }
 
   /**
@@ -460,24 +437,34 @@ public final class LocalizationService {
     given = List.copyOf(pending);
     pending.clear();
     localizer.measurements(given);
-    Optional<List<VisionDecision>> decisions = localizer.decisions();
+    Optional<List<MeasurementVerdict>> verdicts = localizer.verdicts();
     List<FrameVerdict> frames = new ArrayList<>(refused.size() + given.size());
     frames.addAll(refused);
     refused.clear();
-    if (decisions.isPresent()) {
-      for (VisionDecision decision : decisions.get()) {
-        frames.add(FrameVerdict.of(decision));
+    if (verdicts.isPresent()) {
+      for (MeasurementVerdict weighed : verdicts.get()) {
+        frames.add(FrameVerdict.of(weighed, leftOutOf(weighed.measurement())));
       }
     } else {
       for (VisionMeasurement measurement : given) {
-        frames.add(FrameVerdict.given(measurement));
+        frames.add(FrameVerdict.given(measurement, leftOutOf(measurement)));
       }
     }
+    leftOutOf.clear();
     return LocalizationOutput.builder()
         .report(report())
         .trust(localizer.trust())
         .frames(frames)
         .build();
+  }
+
+  /** The tags the pipeline left out of a measurement's image: none, for one solved elsewhere. */
+  private List<TagVerdict> leftOutOf(VisionMeasurement measurement) {
+    List<TagVerdict> leftOut = leftOutOf.get(measurement);
+    if (leftOut == null) {
+      return List.of();
+    }
+    return leftOut;
   }
 
   /**
@@ -596,6 +583,10 @@ public final class LocalizationService {
    */
   private void takeMotion() {
     recentYawRates[yawRateLoop] = Math.abs(turningRadiansPerSecond());
+    // A rate that isn't a number says nothing of the turning, and would hide the loops' others.
+    if (!Double.isFinite(recentYawRates[yawRateLoop])) {
+      recentYawRates[yawRateLoop] = 0;
+    }
     double recentYawRate = 0;
     for (double rate : recentYawRates) {
       recentYawRate = Math.max(recentYawRate, rate);

@@ -64,6 +64,10 @@ class MeasurementsTest {
         .as("an attitude that isn't a number")
         .isFalse();
     assertThat(
+            ImuReadingsBuilder.builder(level).yawRateRadiansPerSecond(Double.NaN).build().usable())
+        .as("a turn rate that isn't a number")
+        .isFalse();
+    assertThat(
             ImuReadingsBuilder.builder(level)
                 .yaws(
                     YawSamples.of(
@@ -79,8 +83,8 @@ class MeasurementsTest {
 
   @Test
   void tagDetectionsKeepTheirOwnListsAndCheckEachTag() {
-    List<TagDetections.Tag> tags = new ArrayList<>();
-    tags.add(new TagDetections.Tag(26, CORNERS, Transform3d.ZERO, Transform3d.ZERO, 0.1));
+    List<TagDetections.Sighting> tags = new ArrayList<>();
+    tags.add(new TagDetections.Sighting(26, CORNERS, Transform3d.ZERO, Transform3d.ZERO, 0.1));
     TagDetections.MultiTag multiTag =
         new TagDetections.MultiTag(Transform3d.ZERO, 0.3, List.of(25, 26));
     TagDetections seen = new TagDetections(5, "front-left", tags, multiTag);
@@ -93,11 +97,11 @@ class MeasurementsTest {
     assertThat(new TagDetections(5, "front-left", List.of(), null).multiTag()).isNull();
     assertThatThrownBy(
             () ->
-                new TagDetections.Tag(
+                new TagDetections.Sighting(
                     26, CORNERS.subList(0, 3), Transform3d.ZERO, Transform3d.ZERO, 0.1))
         .hasMessageContaining("4 corners");
     assertThatThrownBy(
-            () -> new TagDetections.Tag(26, CORNERS, Transform3d.ZERO, Transform3d.ZERO, 1.5))
+            () -> new TagDetections.Sighting(26, CORNERS, Transform3d.ZERO, Transform3d.ZERO, 1.5))
         .hasMessageContaining("ambiguity");
     assertThatThrownBy(() -> new TagDetections.MultiTag(Transform3d.ZERO, -1, List.of(26)))
         .hasMessageContaining("reprojection");

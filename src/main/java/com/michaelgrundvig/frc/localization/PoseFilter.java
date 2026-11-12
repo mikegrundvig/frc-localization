@@ -50,8 +50,9 @@ import org.wpilib.math.geometry.Rotation2d;
  * heading then says something about both, by how far the heading was off after how much turning and
  * how much time, and the filter corrects all three. Once they are known, the heading stays right
  * through a turn and through a stretch without tags, with no camera needed. The filter can also be
- * made to leave them alone ({@link GyroErrors#CONSIDERED}): it then carries the scale's doubt but
- * never corrects it, and takes the drift as noise that grows the heading's doubt with time.
+ * made to leave them alone ({@link EstimatorConfig.GyroErrors#CONSIDERED}): it then carries the
+ * scale's doubt but never corrects it, and takes the drift as noise that grows the heading's doubt
+ * with time.
  *
  * <p><b>The cameras' turns on their mounts.</b> A camera turned on its mount by a degree, from
  * where its configuration says, puts every tag it sees a degree round, and so the robot: 5 cm at 3
@@ -77,7 +78,7 @@ import org.wpilib.math.geometry.Rotation2d;
  *       the distance to the tags, at right angles to them ({@link VisionMeasurement#lever}). So
  *       each fix measures the position and the heading's error together. By default such a fix
  *       still does not correct the heading: the gyro owns it, and only a measurement with a heading
- *       of its own corrects its drift. With {@code positionFixesCorrectHeading}, every fix corrects
+ *       of its own corrects its drift. With {@link HeadingCorrection#EVERY_FIX}, every fix corrects
  *       it, which is an ordinary full Kalman update.
  *   <li><b>The backup IMU's scale.</b> It errs as the gyro's does, by a scale of its own: three
  *       turns one way on the gyro and three back on the backup do not cancel. It turns the robot
@@ -115,85 +116,6 @@ final class PoseFilter {
   private static final PoseCovariance NO_IDEA = PoseCovariance.fromStdDevs(100, 100, Math.PI);
 
   /**
-   * How unsure the filter is of the errors it considers.
-   *
-   * @param gyroScaleStdDev the gyro's scale error: radians of heading per radian it turns
-   * @param backupScaleStdDev the backup IMU's
-   * @param cameraTurnStdDevRadians each camera's turn on its mount, as unsure as it starts: and for
-   *     a camera without a place, as unsure as it is in every image
-   * @param cameraShiftStdDevMeters each camera's shift on its mount, forward and left
-   * @param cameraShiftStdDevRadians and of its headings
-   * @param tagPlacementStdDevMeters each tag's placement, along x and along y
-   * @param shiftCorrelationMeters how far the robot moves before a camera's headings' shift is
-   *     mostly a new one: what the filter keeps of it falls by a factor of e over this distance
-   * @param shiftCorrelationRadians and over this much turning
-   */
-  record Considered(
-      double gyroScaleStdDev,
-      double backupScaleStdDev,
-      double cameraTurnStdDevRadians,
-      double cameraShiftStdDevMeters,
-      double cameraShiftStdDevRadians,
-      double tagPlacementStdDevMeters,
-      double shiftCorrelationMeters,
-      double shiftCorrelationRadians) {}
-
-  /**
-   * How far a camera's measurement is from the estimate, and how surprising that is.
-   *
-   * @param xMeters the position's innovation along the field's x: measured less predicted
-   * @param yMeters and along y
-   * @param withHeading whether the measurement has a heading of its own
-   * @param headingRadians the heading's innovation; NaN for a measurement without a heading
-   * @param chiSquared the whole innovation's squared distance from zero, measured in its own
-   *     uncertainty (its squared Mahalanobis distance): what the estimator's gate tests
-   * @param positionChiSquared the same for the position alone
-   * @param stamp which of the filter's innovations this is. {@link #correct(Innovation)} applies
-   *     only the latest, because the filter holds the working of only one at a time
-   */
-  record Innovation(
-      double xMeters,
-      double yMeters,
-      boolean withHeading,
-      double headingRadians,
-      double chiSquared,
-      double positionChiSquared,
-      long stamp) {
-    double distanceMeters() {
-      return Math.hypot(xMeters, yMeters);
-    }
-  }
-
-  /** Whether camera measurements may correct the gyro's own errors, or only carry their doubt. */
-  enum GyroErrors {
-    /**
-     * The scale's doubt is carried, at the variance the filter was told, and never corrected. A
-     * steady drift is not considered at all: the heading noise each step is given stands for it.
-     */
-    CONSIDERED,
-    /** Every measurement that corrects the heading corrects the scale and the drift with it. */
-    ESTIMATED
-  }
-
-  /**
-   * How unsure the filter is of the gyro's drift, and how far both of the gyro's errors may wander,
-   * where it estimates them.
-   *
-   * @param driftStdDevRadiansPerSecond how fast the gyro may drift steadily, before any camera has
-   *     said anything of it
-   * @param scaleWanderPerSqrtSecond how far the scale may have wandered after one second, as a
-   *     standard deviation: its variance grows with time
-   * @param driftWanderPerSqrtSecond the same for the drift, in radians a second
-   */
-  record GyroDoubt(
-      double driftStdDevRadiansPerSecond,
-      double scaleWanderPerSqrtSecond,
-      double driftWanderPerSqrtSecond) {
-    /** A gyro whose drift is not estimated, and whose errors stay what they are. */
-    static final GyroDoubt NONE = new GyroDoubt(0, 0, 0);
-  }
-
-  /**
    * How many values of the state are in use: the first five, and one turn for each of the robot's
    * cameras ({@link #cameraCount}). The turns of places no camera has yet stay as they started,
    * related to nothing, so every product over the state stops here.
@@ -202,9 +124,6 @@ final class PoseFilter {
 
   /** How many errors the filter considers, which is how many columns C has. */
   private final int consideredCount;
-
-  // The considered errors' variances.
-  private final double backupScaleVariance;
 
   /**
    * Each camera's shift's variance along each axis, by the camera's place. They start as the filter
@@ -218,19 +137,6 @@ final class PoseFilter {
    * share, which is carried ({@link CameraCorrection}).
    */
   private final double[] turnPriorVariance = new double[ConsideredErrors.MAX_CAMERAS];
-
-  /**
-   * How far each camera's turn may wander, by its place: the variance each second adds to it, in
-   * radians squared.
-   */
-  private final double[] turnVariancePerSecond = new double[ConsideredErrors.MAX_CAMERAS];
-
-  private final double shiftCorrelationMeters;
-  private final double shiftCorrelationRadians;
-
-  // How fast each of the gyro's errors may wander: the variance each second adds to it.
-  private final double scaleVariancePerSecond;
-  private final double driftVariancePerSecond;
 
   // The state.
   private double x;
@@ -268,47 +174,47 @@ final class PoseFilter {
   /** The working of camera measurements against this filter's P and C, which it shares. */
   private final CameraCorrection correction;
 
+  /** How each odometry step grows P and C, which it shares. */
+  private final CovarianceGrowth growth;
+
   /**
    * A filter in which a position fix leaves the heading to measurements with a heading of their
-   * own.
+   * own, and the gyro's errors are only considered.
    *
    * @param tags how many tags' placement to keep apart: the field's, each given a place from 0
    */
-  PoseFilter(Considered sizes, int tags) {
-    this(sizes, tags, false);
+  PoseFilter(ConsideredSizes sizes, int tags) {
+    this(
+        sizes,
+        tags,
+        HeadingCorrection.HEADING_MEASUREMENTS,
+        EstimatorConfig.GyroErrors.CONSIDERED,
+        GyroDoubt.NONE);
   }
 
   /**
    * @param tags how many tags' placement to keep apart: the field's, each given a place from 0
-   * @param positionFixesCorrectHeading whether a position fix also corrects the heading, through
-   *     its lever and how the position's error has come to relate to the heading's: a full Kalman
-   *     update. False leaves the heading to measurements with a heading of their own: the gyro owns
-   *     it.
-   */
-  PoseFilter(Considered sizes, int tags, boolean positionFixesCorrectHeading) {
-    this(sizes, tags, positionFixesCorrectHeading, GyroErrors.CONSIDERED, GyroDoubt.NONE);
-  }
-
-  /**
-   * @param tags how many tags' placement to keep apart: the field's, each given a place from 0
-   * @param positionFixesCorrectHeading whether a position fix also corrects the heading
+   * @param heading what corrects the heading: with {@link HeadingCorrection#EVERY_FIX} a position
+   *     fix also corrects it, through its lever and how the position's error has come to relate to
+   *     the heading's, a full Kalman update; otherwise only measurements with a heading of their
+   *     own do, and the gyro owns it
    * @param gyroErrors whether measurements that correct the heading correct the gyro's scale and
    *     drift too. Either way the scale starts at zero, as unsure as {@code sizes} says.
    * @param gyroDoubt how unsure the drift starts, and how far both may wander. It counts only where
    *     the gyro's errors are estimated.
    */
   PoseFilter(
-      Considered sizes,
+      ConsideredSizes sizes,
       int tags,
-      boolean positionFixesCorrectHeading,
-      GyroErrors gyroErrors,
+      HeadingCorrection heading,
+      EstimatorConfig.GyroErrors gyroErrors,
       GyroDoubt gyroDoubt) {
-    this(sizes, tags, positionFixesCorrectHeading, gyroErrors, gyroDoubt, 0);
+    this(sizes, tags, heading, gyroErrors, gyroDoubt, 0);
   }
 
   /**
    * @param tags how many tags' placement to keep apart: the field's, each given a place from 0
-   * @param positionFixesCorrectHeading whether a position fix also corrects the heading
+   * @param heading what corrects the heading
    * @param gyroErrors whether measurements that correct the heading correct the gyro's scale and
    *     drift too
    * @param gyroDoubt how unsure the drift starts, and how far both may wander
@@ -317,10 +223,10 @@ final class PoseFilter {
    *     estimate of it never grows too sure to follow a mount that settles
    */
   PoseFilter(
-      Considered sizes,
+      ConsideredSizes sizes,
       int tags,
-      boolean positionFixesCorrectHeading,
-      GyroErrors gyroErrors,
+      HeadingCorrection heading,
+      EstimatorConfig.GyroErrors gyroErrors,
       GyroDoubt gyroDoubt,
       double turnWanderPerSqrtSecond) {
     if (tags < 0) {
@@ -328,28 +234,31 @@ final class PoseFilter {
     }
     consideredCount = ConsideredErrors.count(tags);
     crossCovariance = new double[STATES * consideredCount];
-    boolean estimated = gyroErrors == GyroErrors.ESTIMATED;
+    boolean estimated = gyroErrors == EstimatorConfig.GyroErrors.ESTIMATED;
     covariance[cell(GYRO_SCALE, GYRO_SCALE)] = square(sizes.gyroScaleStdDev());
     covariance[cell(GYRO_DRIFT, GYRO_DRIFT)] =
         estimated ? square(gyroDoubt.driftStdDevRadiansPerSecond()) : 0;
-    scaleVariancePerSecond = estimated ? square(gyroDoubt.scaleWanderPerSqrtSecond()) : 0;
-    driftVariancePerSecond = estimated ? square(gyroDoubt.driftWanderPerSqrtSecond()) : 0;
-    backupScaleVariance = square(sizes.backupScaleStdDev());
-    shiftCorrelationMeters = sizes.shiftCorrelationMeters();
-    shiftCorrelationRadians = sizes.shiftCorrelationRadians();
-    Arrays.fill(turnVariancePerSecond, square(turnWanderPerSqrtSecond));
     Arrays.fill(turnPriorVariance, square(sizes.cameraTurnStdDevRadians()));
     for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
       int turn = turnOf(camera);
       covariance[cell(turn, turn)] = turnPriorVariance[camera];
     }
     Arrays.fill(cameraShiftVariance, square(sizes.cameraShiftStdDevMeters()));
+    growth =
+        new CovarianceGrowth(
+            sizes,
+            gyroErrors,
+            gyroDoubt,
+            turnWanderPerSqrtSecond,
+            covariance,
+            crossCovariance,
+            consideredCount);
     correction =
         new CameraCorrection(
             sizes,
             tags,
-            positionFixesCorrectHeading,
-            estimated,
+            heading,
+            gyroErrors,
             covariance,
             crossCovariance,
             cameraShiftVariance,
@@ -501,7 +410,7 @@ final class PoseFilter {
     int turn = turnOf(camera);
     covariance[cell(turn, turn)] = turnVariance;
     turnPriorVariance[camera] = turnVariance;
-    this.turnVariancePerSecond[camera] = turnVariancePerSecond;
+    growth.setTurnWander(camera, turnVariancePerSecond);
     cameraShiftVariance[camera] = shiftVariance;
   }
 
@@ -589,120 +498,7 @@ final class PoseFilter {
     y += moveY;
     headingOffset += gyroError;
 
-    // A heading offset that is a little off swings the move about its start: an offset off by dθ
-    // puts x off by -moveY dθ and y off by moveX dθ.
-    errorGrowsBy(X, HEADING, -moveY);
-    errorGrowsBy(Y, HEADING, moveX);
-    switch (turnedBy) {
-      case GYRO -> {
-        // The gyro's scale error adds the turn times itself to the heading, and its drift the
-        // time times itself.
-        errorGrowsBy(HEADING, GYRO_SCALE, turn);
-        errorGrowsBy(HEADING, GYRO_DRIFT, seconds);
-        covariance[cell(GYRO_SCALE, GYRO_SCALE)] += scaleVariancePerSecond * seconds;
-        covariance[cell(GYRO_DRIFT, GYRO_DRIFT)] += driftVariancePerSecond * seconds;
-      }
-      case BACKUP -> addScaleError(turn, ConsideredErrors.BACKUP_SCALE, backupScaleVariance);
-      case WHEELS -> {}
-    }
-    letGoOfHeadingsShifts(Math.hypot(moveX, moveY), Math.abs(turn));
-    letCameraTurnsWander(seconds);
-
-    covariance[XX] += positionNoise;
-    covariance[YY] += positionNoise;
-    covariance[HH] += headingNoise;
-  }
-
-  /**
-   * The covariance's prediction, P = F P F^T, for one way an error feeds another: the error of one
-   * value of the state grows by a factor times the error of another. F, the Jacobian of the new
-   * state with respect to the old, is then the identity with that factor in the first value's row
-   * and the other's column. A heading error swinging a move into x is one such F, and the gyro's
-   * scale error turning into heading is another.
-   *
-   * <p>F P adds the factor times the other's row to the first value's row, and then (F P) F^T adds
-   * the factor times the other's column to the first value's column. Between them the first value's
-   * own variance gains twice the factor times the two's covariance, plus the factor squared times
-   * the other's variance. C, the dependence on the considered errors, is predicted by the same F: C
-   * = F C adds the factor times the other's row to the first value's row.
-   *
-   * @param grows the value of the state whose error grows
-   * @param from the value whose error feeds it, which is another one
-   * @param factor how much of that error is added
-   */
-  private void errorGrowsBy(int grows, int from, double factor) {
-    for (int column = 0; column < activeStates; column++) {
-      covariance[cell(grows, column)] += factor * covariance[cell(from, column)];
-    }
-    for (int row = 0; row < activeStates; row++) {
-      covariance[cell(row, grows)] += factor * covariance[cell(row, from)];
-    }
-    for (int column = 0; column < consideredCount; column++) {
-      crossCovariance[cross(grows, column)] += factor * crossCovariance[cross(from, column)];
-    }
-  }
-
-  /**
-   * The backup IMU's scale error, which is considered and never estimated. An IMU that reads its
-   * turns a little large or small adds its scale error times the turn to the heading's error. It is
-   * the same error every turn, so the heading comes to depend on it: with s the scale error and v
-   * its variance, the heading's error grows by turn times s, which adds
-   *
-   * <pre>
-   *   to the heading's variance                    2 turn cov(heading, s) + turn² v
-   *   to cov(any other value, heading)             turn cov(that value, s)
-   *   to cov(heading, s)                           turn v
-   * </pre>
-   *
-   * <p>A scale with no variance is not considered at all.
-   */
-  private void addScaleError(double turn, int scaleColumn, double scaleVariance) {
-    boolean considered = scaleVariance > 0;
-    if (!considered) {
-      return;
-    }
-    for (int state = 0; state < activeStates; state++) {
-      if (state == HEADING) {
-        continue;
-      }
-      covariance[cell(state, HEADING)] += turn * crossCovariance[cross(state, scaleColumn)];
-      covariance[cell(HEADING, state)] = covariance[cell(state, HEADING)];
-    }
-    covariance[HH] +=
-        2 * turn * crossCovariance[cross(HEADING, scaleColumn)] + turn * turn * scaleVariance;
-    crossCovariance[cross(HEADING, scaleColumn)] += turn * scaleVariance;
-  }
-
-  /**
-   * As the robot moves and turns, each camera sees other tags, or the same ones from elsewhere, and
-   * its headings' shift becomes a different one. So the state's dependence on each camera's
-   * headings' shift decays, by a factor of e for each correlation distance moved and each
-   * correlation angle turned. A camera's shift on its mount and each tag's placement stay what they
-   * are, and their columns are left alone.
-   */
-  private void letGoOfHeadingsShifts(double movedMeters, double turnedRadians) {
-    double kept =
-        Math.exp(-movedMeters / shiftCorrelationMeters - turnedRadians / shiftCorrelationRadians);
-    if (kept < 1) {
-      for (int camera = 0; camera < ConsideredErrors.MAX_CAMERAS; camera++) {
-        for (int state = 0; state < activeStates; state++) {
-          crossCovariance[cross(state, ConsideredErrors.cameraHeadingsShift(camera))] *= kept;
-        }
-      }
-    }
-  }
-
-  /** How many cameras' turns are in use: places 0 up. */
-  private int activeCameras() {
-    return activeStates - StateLayout.FIRST_CAMERA_TURN;
-  }
-
-  /** Each camera's turn may wander a little each second: its variance grows by the time. */
-  private void letCameraTurnsWander(double seconds) {
-    for (int camera = 0; camera < activeCameras(); camera++) {
-      int turn = turnOf(camera);
-      covariance[cell(turn, turn)] += turnVariancePerSecond[camera] * seconds;
-    }
+    growth.grow(moveX, moveY, turn, seconds, positionNoise, headingNoise, turnedBy, activeStates);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -933,6 +729,11 @@ final class PoseFilter {
   // ---------------------------------------------------------------------------------------------
   // The matrices' layouts.
   // ---------------------------------------------------------------------------------------------
+
+  /** How many cameras' turns are in use: places 0 up. */
+  private int activeCameras() {
+    return activeStates - StateLayout.FIRST_CAMERA_TURN;
+  }
 
   /**
    * Where a cell of a matrix with one column for each considered error sits in its array, stored

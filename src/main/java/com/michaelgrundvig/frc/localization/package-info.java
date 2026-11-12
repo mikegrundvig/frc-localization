@@ -59,7 +59,7 @@
  *       image go through the {@link com.michaelgrundvig.frc.localization.VisionPipeline}, which
  *       solves them (with {@link com.michaelgrundvig.frc.localization.TagSolver}) into a {@link
  *       com.michaelgrundvig.frc.localization.VisionMeasurement}, or says why not; the estimator's
- *       {@link com.michaelgrundvig.frc.localization.VisionDecision} says what became of it. The
+ *       {@link com.michaelgrundvig.frc.localization.MeasurementVerdict} says what became of it. The
  *       service solves each image as the robot was when it was taken ({@link
  *       com.michaelgrundvig.frc.localization.CaptureContext}), against the field's tag poses. The
  *       robot program's {@code Vision} still holds a field model of its own, to place each tag it
@@ -101,11 +101,10 @@
  *
  * <ul>
  *   <li>a position a camera solved with the gyro's heading leans on that heading, in every image:
- *       it carries the heading's doubt, and by default doesn't correct the heading (the gyro owns
- *       it; a measurement with a heading of its own corrects its drift, with all three of its rows:
- *       its position too, through how the position's error has come to depend on the heading's).
- *       {@link com.michaelgrundvig.frc.localization.EstimatorConfig#headingCorrection} can let
- *       every fix correct it;
+ *       it carries the heading's doubt, and corrects the heading through it ({@link
+ *       com.michaelgrundvig.frc.localization.HeadingCorrection#EVERY_FIX}). The ways the
+ *       consistency study compares it with leave the heading to measurements with a heading of
+ *       their own, with all three of their rows;
  *   <li>a gyro reading its turns a little long or short is off the same way every turn;
  *   <li>each camera's turn and shift on its mount are in every image it takes, and what its
  *       multi-tag headings share, until it moves on and sees other tags;

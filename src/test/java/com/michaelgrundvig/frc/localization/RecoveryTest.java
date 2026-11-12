@@ -15,7 +15,7 @@ import org.junit.jupiter.params.provider.MethodSource;
  * their agreement is judged here; {@code RecoveryCasesTest} has which sources count.
  */
 class RecoveryTest {
-  private static final EstimatorConfig CONFIG = EstimatorConfig.DEFAULTS;
+  private static final EstimatorConfig CONFIG = EstimatorConfig.defaults();
   private static final double AGREE_METERS = CONFIG.recoveryAgreementMeters();
   private static final long WINDOW_NANOS = Timestamps.fromSeconds(CONFIG.recoveryWindowSeconds());
 
@@ -25,12 +25,14 @@ class RecoveryTest {
 
   /** A rejection whose position says the estimate's is wrong, with no heading of its own. */
   private static Recovery.Rejected positionAt(long time, double x, double y) {
-    return new Recovery.Rejected(time, "front", List.of(26), x, y, Double.NaN, false, true);
+    return new Recovery.Rejected(
+        time, "front", List.of(26), x, y, Double.NaN, Recovery.PositionSays.WRONG);
   }
 
   /** A rejection whose heading alone disagreed. */
   private static Recovery.Rejected headingOf(long time, double radians) {
-    return new Recovery.Rejected(time, "front", List.of(26), 0, 0, radians, true, true);
+    return new Recovery.Rejected(
+        time, "front", List.of(26), 0, 0, radians, Recovery.PositionSays.AGREES);
   }
 
   @Test
@@ -73,12 +75,13 @@ class RecoveryTest {
   void theHeadingsThatAgreeAreJudgedOnTheirOwn() {
     recovery.rejected(positionAt(10, 1, 2));
     recovery.rejected(positionAt(20, 1, 2));
-    recovery.rejected(new Recovery.Rejected(30, "front", List.of(26), 1, 2, 0.3, false, true));
+    recovery.rejected(
+        new Recovery.Rejected(30, "front", List.of(26), 1, 2, 0.3, Recovery.PositionSays.WRONG));
     recovery.rejected(headingOf(40, 0.3));
     recovery.rejected(headingOf(50, 0.3));
 
     assertThat(recovery.positionCorrection(HIT)).isPresent();
-    assertThat(recovery.headingCorrection(HIT).orElseThrow()).isCloseTo(0.3, within(1e-12));
+    assertThat(recovery.headingCorrection(HIT, 0).orElseThrow()).isCloseTo(0.3, within(1e-12));
   }
 
   @Test
@@ -150,12 +153,11 @@ class RecoveryTest {
               1,
               2,
               0.3,
-              false,
-              true));
+              Recovery.PositionSays.WRONG));
     }
 
     boolean moves = recovery.positionCorrection(row.sign()).isPresent();
-    boolean turns = recovery.headingCorrection(row.sign()).isPresent();
+    boolean turns = recovery.headingCorrection(row.sign(), 0).isPresent();
 
     assertThat(moves).isEqualTo(row.recovers() != Recovers.NOTHING);
     assertThat(turns).isEqualTo(row.recovers() == Recovers.THE_HEADING_AND_THE_POSITION);

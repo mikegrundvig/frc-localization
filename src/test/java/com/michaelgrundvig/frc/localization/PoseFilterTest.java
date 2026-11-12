@@ -29,16 +29,14 @@ class PoseFilterTest {
    * A gyro whose scale may be off by 0.3%, cameras turned 0.25° and shifted 3 mm on their mounts,
    * their headings 1°, and tags 1 cm off the layout.
    */
-  private static final PoseFilter.Considered CONSIDERED =
-      new PoseFilter.Considered(
-          0.003, 0.005, TURN, SHIFT, HEADING_SHIFT, TAG, 1.0, Math.toRadians(45));
+  private static final ConsideredSizes CONSIDERED =
+      new ConsideredSizes(0.003, 0.005, TURN, SHIFT, HEADING_SHIFT, TAG, 1.0, Math.toRadians(45));
 
   /** Nothing considered: every error is new each time, the textbook filter. */
-  private static final PoseFilter.Considered TEXTBOOK =
-      new PoseFilter.Considered(0, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45));
+  private static final ConsideredSizes TEXTBOOK =
+      new ConsideredSizes(0, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45));
 
-  private static PoseFilter placed(
-      PoseFilter.Considered considered, double meters, double radians) {
+  private static PoseFilter placed(ConsideredSizes considered, double meters, double radians) {
     PoseFilter filter = new PoseFilter(considered, TAGS);
     filter.set(
         new PoseReset(0, Pose2d.ZERO, PoseCovariance.fromStdDevs(meters, meters, radians), "x"), 0);
@@ -316,10 +314,8 @@ class PoseFilterTest {
     PoseFilter filter = placed(TEXTBOOK, 0.1, 0.01);
     VisionMeasurement here = fix(Translation2d.ZERO, Translation2d.ZERO, 0.1);
     VisionMeasurement there = fix(new Translation2d(0.2, 0), Translation2d.ZERO, 0.1);
-    PoseFilter.Innovation first =
-        Objects.requireNonNull(filter.innovation(here, 0, 0, places(here)));
-    PoseFilter.Innovation second =
-        Objects.requireNonNull(filter.innovation(there, 0, 0, places(there)));
+    Innovation first = Objects.requireNonNull(filter.innovation(here, 0, 0, places(here)));
+    Innovation second = Objects.requireNonNull(filter.innovation(there, 0, 0, places(there)));
 
     assertThatThrownBy(() -> filter.correct(first))
         .isInstanceOf(IllegalStateException.class)
@@ -432,15 +428,14 @@ class PoseFilterTest {
   // ---- The gyro's scale, where the filter estimates it ----
 
   /** Only the gyro's scale is in doubt, by 1%: every other error is new each time. */
-  private static final PoseFilter.Considered SCALE_ALONE =
-      new PoseFilter.Considered(0.01, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45));
+  private static final ConsideredSizes SCALE_ALONE =
+      new ConsideredSizes(0.01, 0, 0, 0, 0, 0, 1.0, Math.toRadians(45));
 
   /**
    * A gyro whose drift is 0.001 rad/s in doubt at first, its scale wandering 0.0003 in a second and
    * its drift 0.0002 rad/s.
    */
-  private static final PoseFilter.GyroDoubt WANDERING =
-      new PoseFilter.GyroDoubt(0.001, 0.0003, 0.0002);
+  private static final GyroDoubt WANDERING = new GyroDoubt(0.001, 0.0003, 0.0002);
 
   /** What a gyro reading 2% high shows for a quarter turn, and the turn the robot really made. */
   private static final double SHOWN = 1.02 * Math.PI / 2;
@@ -449,9 +444,8 @@ class PoseFilterTest {
 
   /** A filter sure of where it starts and which way it faces, in doubt of the gyro's scale. */
   private static PoseFilter sureOfAllButTheScale(
-      boolean positionFixesCorrectHeading, PoseFilter.GyroErrors gyroErrors) {
-    PoseFilter filter =
-        new PoseFilter(SCALE_ALONE, TAGS, positionFixesCorrectHeading, gyroErrors, WANDERING);
+      HeadingCorrection heading, EstimatorConfig.GyroErrors gyroErrors) {
+    PoseFilter filter = new PoseFilter(SCALE_ALONE, TAGS, heading, gyroErrors, WANDERING);
     filter.set(new PoseReset(0, Pose2d.ZERO, PoseCovariance.fromStdDevs(0.01, 0.01, 0), "x"), 0);
     return filter;
   }
@@ -463,8 +457,12 @@ class PoseFilterTest {
    */
   @Test
   void aHeadingFoundOffAfterATurnIsLaidToTheGyrosScale() {
-    PoseFilter estimating = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
-    PoseFilter considering = sureOfAllButTheScale(false, PoseFilter.GyroErrors.CONSIDERED);
+    PoseFilter estimating =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.ESTIMATED);
+    PoseFilter considering =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.CONSIDERED);
     for (PoseFilter filter : List.of(estimating, considering)) {
       filter.predict(0, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
       apply(filter, withHeading(new Rotation2d(REAL), 1.0, 1e-4), SHOWN, 0);
@@ -497,8 +495,11 @@ class PoseFilterTest {
    */
   @Test
   void aPositionFixCorrectsTheScaleOnlyWhereItCorrectsTheHeading() {
-    PoseFilter leavingHeading = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
-    PoseFilter correctingHeading = sureOfAllButTheScale(true, PoseFilter.GyroErrors.ESTIMATED);
+    PoseFilter leavingHeading =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.ESTIMATED);
+    PoseFilter correctingHeading =
+        sureOfAllButTheScale(HeadingCorrection.EVERY_FIX, EstimatorConfig.GyroErrors.ESTIMATED);
     for (PoseFilter filter : List.of(leavingHeading, correctingHeading)) {
       filter.predict(0, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
       Rotation2d solvedWith = new Rotation2d(SHOWN);
@@ -522,8 +523,12 @@ class PoseFilterTest {
    */
   @Test
   void theGyrosErrorsDoubtGrowsAsTheyWander() {
-    PoseFilter estimating = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
-    PoseFilter considering = sureOfAllButTheScale(false, PoseFilter.GyroErrors.CONSIDERED);
+    PoseFilter estimating =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.ESTIMATED);
+    PoseFilter considering =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.CONSIDERED);
     assertThat(estimating.gyroDriftStdDev()).isCloseTo(0.001, within(1e-15));
 
     estimating.predict(0, 0, 0, 0, 1, 0, 0, YawSource.GYRO);
@@ -549,7 +554,9 @@ class PoseFilterTest {
    */
   @Test
   void aHeadingFoundOffAfterStandingIsLaidToTheGyrosDrift() {
-    PoseFilter filter = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    PoseFilter filter =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.ESTIMATED);
     // Ten seconds in which the gyro's yaw crept 0.005 rad while the robot stood still.
     double crept = 0.005;
     filter.predict(0, crept, 0, 0, 10, 0, 0, YawSource.GYRO);
@@ -569,7 +576,9 @@ class PoseFilterTest {
    */
   @Test
   void aHeadingToldAfreshKeepsTheScaleFound() {
-    PoseFilter filter = sureOfAllButTheScale(false, PoseFilter.GyroErrors.ESTIMATED);
+    PoseFilter filter =
+        sureOfAllButTheScale(
+            HeadingCorrection.HEADING_MEASUREMENTS, EstimatorConfig.GyroErrors.ESTIMATED);
     filter.predict(0, SHOWN, 0, 0, 0, 0, 0, YawSource.GYRO);
     apply(filter, withHeading(new Rotation2d(REAL), 1.0, 1e-4), SHOWN, 0);
     double found = filter.gyroScale();
@@ -606,7 +615,7 @@ class PoseFilterTest {
             List.of(26),
             VisionMeasurement.Solver.HEADING_CONSTRAINED);
 
-    PoseFilter.Innovation innovation =
+    Innovation innovation =
         Objects.requireNonNull(
             filter.innovation(measurement, 0, 3, places(measurement), 0.05, -0.08, 0.01));
 

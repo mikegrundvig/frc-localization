@@ -11,7 +11,7 @@ package com.michaelgrundvig.frc.localization;
  * @param chiSquared its squared Mahalanobis distance from the estimate; NaN if not compared
  * @param threshold the gate its χ² was held to; NaN if not compared
  */
-public record VisionDecision(
+public record MeasurementVerdict(
     VisionMeasurement measurement,
     Verdict verdict,
     double innovationMeters,
@@ -23,7 +23,7 @@ public record VisionDecision(
   }
 
   /** Why, in words, as the log has them: "accepted", "gate: 45.2 > 13.8", "off the field". */
-  public String reason() {
+  public String described() {
     return verdict.describe(chiSquared, threshold);
   }
 }

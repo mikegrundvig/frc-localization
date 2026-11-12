@@ -223,6 +223,6 @@ class MountCheckTest {
 
   @Test
   void itJudgesByAtLeastOneSighting() {
-    assertThatThrownBy(() -> new MountCheck(0)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new MountCheck(0)).hasMessage("judge by at least one sighting: 0");
   }
 }
