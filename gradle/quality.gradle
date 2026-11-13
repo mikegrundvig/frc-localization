@@ -13,7 +13,9 @@ def outermostBuild = gradle
 while (outermostBuild.parent != null) {
     outermostBuild = outermostBuild.parent
 }
-def testsNamed = outermostBuild.startParameter.taskRequests.any { it.args.contains("--tests") }
+def testsNamed = outermostBuild.startParameter.taskRequests.any {
+    it.args.contains("--tests")
+}
 
 // NullAway checks every package of the library's, and of the model it reads, so a null from the
 // model can't reach localization unchecked.
@@ -139,7 +141,11 @@ if (testsNamed && project == rootProject) {
     }
     def asked = gradle.startParameter.taskRequests.collectMany { request ->
         def args = request.args
-        (0..<args.size()).findAll { args[it] == "--tests" && it + 1 < args.size() }.collect { args[it + 1] }
+        (0..<args.size()).findAll {
+            args[it] == "--tests" && it + 1 <args.size()
+        }.collect {
+            args[it + 1]
+        }
     }.join(", ")
     tasks.register("testsMatched") {
         group = "verification"
@@ -207,16 +213,20 @@ def coverageCheck = tasks.register("coverageCheck") {
                     covered += c.@covered.toDouble()
                 }
             }
-            return missed + covered > 0 ? 100.0 * covered / (missed + covered) : null
+            return missed + covered> 0 ? 100.0 * covered / (missed + covered) : null
         }
-        def scopes = floors.stringPropertyNames().findAll { !it.startsWith("file.") }.collect {
+        def scopes = floors.stringPropertyNames().findAll {
+            !it.startsWith("file.")
+        }.collect {
             it.contains(".") ? it.substring(0, it.lastIndexOf(".")) : ""
         }.unique().sort()
         def failures = []
         def fileFloorText = floors.getProperty("file.line")
         if (fileFloorText != null && xml != null) {
             double fileFloor = fileFloorText.toDouble()
-            def exempt = (floors.getProperty("file.exempt") ?: "").split(",")*.trim().findAll { it }
+            def exempt = (floors.getProperty("file.exempt") ?: "").split(",")*.trim().findAll {
+                it
+            }
             def lowest = null
             xml.package.each { pkg ->
                 pkg.sourcefile.each { source ->
@@ -228,10 +238,10 @@ def coverageCheck = tasks.register("coverageCheck") {
                     double missed = lines.@missed.toDouble()
                     double covered = lines.@covered.toDouble()
                     double actual = 100.0 * covered / (missed + covered)
-                    if (lowest == null || actual < lowest[1]) {
+                    if (lowest == null || actual <lowest[1]) {
                         lowest = [path, actual]
                     }
-                    if (actual < fileFloor) {
+                    if (actual <fileFloor) {
                         failures << String.format("%s line coverage %.1f%% is below the per-file floor %.1f%%", path, actual, fileFloor)
                     }
                 }
@@ -259,7 +269,7 @@ def coverageCheck = tasks.register("coverageCheck") {
                     return
                 }
                 println String.format("Coverage %-20s %-6s %5.1f%% (floor %5.1f%%)", label, key, actual, floor)
-                if (actual < floor) {
+                if (actual <floor) {
                     failures << String.format("%s %s coverage %.1f%% is below the floor %.1f%%", label, key, actual, floor)
                 }
             }

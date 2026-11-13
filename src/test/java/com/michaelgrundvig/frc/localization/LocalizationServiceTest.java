@@ -297,13 +297,12 @@ class LocalizationServiceTest {
         .isLessThan(1e-6);
     assertThat(frame.tags()).extracting(TagVerdict::tag).containsExactly(25, 26);
     assertThat(frame.tags())
-        .allSatisfy(
-            tag -> {
-              assertThat(tag.verdict()).isEqualTo(Verdict.ACCEPTED);
-              assertThat(tag.value()).as("the χ²").isLessThanOrEqualTo(tag.threshold());
-              assertThat(tag.threshold())
-                  .isEqualTo(EstimatorConfig.defaults().gateChiSquaredPosition());
-            });
+        .allSatisfy(tag -> {
+          assertThat(tag.verdict()).isEqualTo(Verdict.ACCEPTED);
+          assertThat(tag.value()).as("the χ²").isLessThanOrEqualTo(tag.threshold());
+          assertThat(tag.threshold())
+              .isEqualTo(EstimatorConfig.defaults().gateChiSquaredPosition());
+        });
     assertThat(output.report().health().orElseThrow().accepted()).isEqualTo(1);
   }
 
@@ -420,12 +419,11 @@ class LocalizationServiceTest {
     assertThat(result[0].measurement()).isNotNull();
     assertThat(output.frames())
         .singleElement()
-        .satisfies(
-            held -> {
-              assertThat(held.verdict()).isEqualTo(Verdict.HELD);
-              assertThat(held.measured()).as("never weighed").isEmpty();
-              assertThat(held.tags()).extracting(TagVerdict::verdict).containsOnly(Verdict.HELD);
-            });
+        .satisfies(held -> {
+          assertThat(held.verdict()).isEqualTo(Verdict.HELD);
+          assertThat(held.measured()).as("never weighed").isEmpty();
+          assertThat(held.tags()).extracting(TagVerdict::verdict).containsOnly(Verdict.HELD);
+        });
     assertThat(output.report().health().orElseThrow().accepted()).isZero();
     assertThatThrownBy(() -> localization.hold(hubFace(now), null, Verdict.GATED))
         .as("the estimator's verdicts are its own")
@@ -567,11 +565,10 @@ class LocalizationServiceTest {
     assertThat(measured.innovationMeters()).isCloseTo(1.5, within(0.01));
     assertThat(gated.described()).startsWith("gate: ").endsWith("> 13.8");
     assertThat(output.frames().get(0).tags())
-        .allSatisfy(
-            tag -> {
-              assertThat(tag.accepted()).isFalse();
-              assertThat(tag.described()).as("each tag, as its frame").isEqualTo(gated.described());
-            });
+        .allSatisfy(tag -> {
+          assertThat(tag.accepted()).isFalse();
+          assertThat(tag.described()).as("each tag, as its frame").isEqualTo(gated.described());
+        });
     assertThat(output.report().pose().getTranslation().getDistance(ROBOT.getTranslation()))
         .isLessThan(1e-6);
   }
@@ -728,18 +725,17 @@ class LocalizationServiceTest {
   void itsRecordsRefuseWhatTheyCantBe() {
     assertThatThrownBy(() -> new LoopContext(-1, true))
         .hasMessage("a time on the robot's clock: -1");
-    assertThatThrownBy(
-            () ->
-                new ImageVerdict(
-                    hubFace(T0),
-                    null,
-                    null,
-                    "neither",
-                    Double.NaN,
-                    Double.NaN,
-                    Double.NaN,
-                    Double.NaN,
-                    List.of()))
+    assertThatThrownBy(() ->
+            new ImageVerdict(
+                hubFace(T0),
+                null,
+                null,
+                "neither",
+                Double.NaN,
+                Double.NaN,
+                Double.NaN,
+                Double.NaN,
+                List.of()))
         .hasMessage("an image becomes a measurement or is refused, not both");
   }
 
@@ -1063,15 +1059,14 @@ class LocalizationServiceTest {
     assertThat(DefaultLocalizer.doubts(DEFINITION, SlipCheck.Settings.defaults())).isEmpty();
     assertThat(DefaultLocalizer.doubts(grippy, SlipCheck.Settings.defaults()))
         .singleElement()
-        .satisfies(
-            doubt -> {
-              assertThat(doubt.level()).isEqualTo(Finding.Level.DOUBT);
-              assertThat(doubt.subject()).isEqualTo("test");
-              assertThat(doubt.message())
-                  .startsWith(
-                      "the treads' grip, 2.26, is past 1.53, above which the slip check can't tell"
-                          + " a slide from a collision");
-            });
+        .satisfies(doubt -> {
+          assertThat(doubt.level()).isEqualTo(Finding.Level.DOUBT);
+          assertThat(doubt.subject()).isEqualTo("test");
+          assertThat(doubt.message())
+              .startsWith(
+                  "the treads' grip, 2.26, is past 1.53, above which the slip check can't tell"
+                      + " a slide from a collision");
+        });
     assertThat(
             new LocalizationService(
                 FIELD,

@@ -38,7 +38,9 @@ def moduleVersions = { Configuration configuration ->
 def compiledAgainst = moduleVersions(configurations.compileClasspath)
 def brought = moduleVersions(configurations.runtimeClasspath)
 def provided = compiledAgainst.zip(brought) { compiled, runs ->
-    new TreeMap<String, String>(compiled.findAll { module, version -> !runs.containsKey(module) })
+    new TreeMap<String, String>(compiled.findAll { module, version ->
+        !runs.containsKey(module)
+    })
 }
 
 def builtWithDir = layout.buildDirectory.dir("generated/built-with")

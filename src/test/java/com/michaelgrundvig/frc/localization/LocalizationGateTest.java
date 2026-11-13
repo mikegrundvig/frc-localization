@@ -87,11 +87,10 @@ class LocalizationGateTest {
   void limitsMustBePositive() {
     assertThatThrownBy(() -> LocalizationGateBuilder.builder(GATE).maxDisagreementMeters(0).build())
         .hasMessage("LocalizationGate.maxDisagreementMeters: 0 must be positive");
-    assertThatThrownBy(
-            () ->
-                LocalizationGateBuilder.builder(GATE)
-                    .maxVisionAgeSeconds(Double.POSITIVE_INFINITY)
-                    .build())
+    assertThatThrownBy(() ->
+            LocalizationGateBuilder.builder(GATE)
+                .maxVisionAgeSeconds(Double.POSITIVE_INFINITY)
+                .build())
         .hasMessage("LocalizationGate.maxVisionAgeSeconds: Infinity must be a finite number");
   }
 }

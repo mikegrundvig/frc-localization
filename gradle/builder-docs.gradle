@@ -62,5 +62,7 @@ tasks.named("compileJava", JavaCompile) { compile ->
 
 tasks.named("sourcesJar") {
     dependsOn "compileJava"
-    from(tasks.named("compileJava", JavaCompile).flatMap { it.options.generatedSourceOutputDirectory })
+    from(tasks.named("compileJava", JavaCompile).flatMap {
+        it.options.generatedSourceOutputDirectory
+    })
 }

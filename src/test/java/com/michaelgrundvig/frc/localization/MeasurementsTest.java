@@ -95,10 +95,9 @@ class MeasurementsTest {
     assertThat(seen.tags().get(0).corners()).hasSize(4);
     assertThat(seen.multiTag()).isNotNull();
     assertThat(new TagDetections(5, "front-left", List.of(), null).multiTag()).isNull();
-    assertThatThrownBy(
-            () ->
-                new TagDetections.Sighting(
-                    26, CORNERS.subList(0, 3), Transform3d.ZERO, Transform3d.ZERO, 0.1))
+    assertThatThrownBy(() ->
+            new TagDetections.Sighting(
+                26, CORNERS.subList(0, 3), Transform3d.ZERO, Transform3d.ZERO, 0.1))
         .hasMessageContaining("4 corners");
     assertThatThrownBy(
             () -> new TagDetections.Sighting(26, CORNERS, Transform3d.ZERO, Transform3d.ZERO, 1.5))
@@ -130,46 +129,42 @@ class MeasurementsTest {
 
     assertThat(measurement.tagIds()).containsExactly(25, 26);
     assertThat(measurement.covariance().hasHeading()).isFalse();
-    assertThatThrownBy(
-            () ->
-                new VisionMeasurement(
-                    5,
-                    Pose2d.ZERO,
-                    PoseCovariance.fromStdDevs(0.05, 0.05, 0.1),
-                    VisionMeasurement.Lever.NONE,
-                    "front-left",
-                    List.of(),
-                    VisionMeasurement.Solver.MULTI_TAG))
+    assertThatThrownBy(() ->
+            new VisionMeasurement(
+                5,
+                Pose2d.ZERO,
+                PoseCovariance.fromStdDevs(0.05, 0.05, 0.1),
+                VisionMeasurement.Lever.NONE,
+                "front-left",
+                List.of(),
+                VisionMeasurement.Solver.MULTI_TAG))
         .hasMessageContaining("at least one tag");
-    assertThatThrownBy(
-            () ->
-                new VisionMeasurement(
-                    5,
-                    Pose2d.ZERO,
-                    PoseCovariance.fromStdDevs(0.05, 0.05, 0.1),
-                    VisionMeasurement.Lever.NONE,
-                    "",
-                    List.of(1),
-                    VisionMeasurement.Solver.SINGLE_TAG))
+    assertThatThrownBy(() ->
+            new VisionMeasurement(
+                5,
+                Pose2d.ZERO,
+                PoseCovariance.fromStdDevs(0.05, 0.05, 0.1),
+                VisionMeasurement.Lever.NONE,
+                "",
+                List.of(1),
+                VisionMeasurement.Solver.SINGLE_TAG))
         .hasMessageContaining("camera");
-    assertThatThrownBy(
-            () ->
-                new VisionMeasurement(
-                    -5,
-                    Pose2d.ZERO,
-                    PoseCovariance.fromStdDevs(0.05, 0.05, 0.1),
-                    VisionMeasurement.Lever.NONE,
-                    "front-left",
-                    List.of(1),
-                    VisionMeasurement.Solver.EXTERNAL))
+    assertThatThrownBy(() ->
+            new VisionMeasurement(
+                -5,
+                Pose2d.ZERO,
+                PoseCovariance.fromStdDevs(0.05, 0.05, 0.1),
+                VisionMeasurement.Lever.NONE,
+                "front-left",
+                List.of(1),
+                VisionMeasurement.Solver.EXTERNAL))
         .hasMessageContaining("robot's clock");
     assertThatThrownBy(
             () -> new VisionMeasurement.Lever(Rotation2d.ZERO, new Translation2d(Double.NaN, 0)))
         .hasMessageContaining("offsets to its tags");
-    assertThatThrownBy(
-            () ->
-                new VisionMeasurement.Lever(
-                    Rotation2d.ZERO, new Translation2d(3, 0), new Translation2d(0, Double.NaN)))
+    assertThatThrownBy(() ->
+            new VisionMeasurement.Lever(
+                Rotation2d.ZERO, new Translation2d(3, 0), new Translation2d(0, Double.NaN)))
         .hasMessageContaining("and its camera");
     VisionMeasurement.Lever lever =
         new VisionMeasurement.Lever(

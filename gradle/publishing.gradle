@@ -27,7 +27,9 @@ java {
 // comes with it. Gradle's module metadata, which Gradle builds read, puts them on a reader's compile
 // classpath and never on its runtime classpath. A POM can't say that, and Gradle writes them there
 // as "compile", which Maven takes for run time too; "provided" is the POM's word for it.
-def provided = configurations.compileOnlyApi.allDependencies.collect { "${it.group}:${it.name}".toString() } as Set
+def provided = configurations.compileOnlyApi.allDependencies.collect {
+    "${it.group}:${it.name}".toString()
+} as Set
 
 // A project's README goes into its sources jar beside the sources: the runtime checks the examples
 // of code in Pitwall's README against compiled code (its DocExamplesTest), from the published jar.
@@ -57,7 +59,9 @@ def testSourcesJar = tasks.register("testSourcesJar", Jar) {
 }
 
 def frcMavenDir = providers.gradleProperty("frcMavenDir")
-        .map { String path -> new File(path.startsWith("~") ? System.getProperty("user.home") + path.substring(1) : path) }
+        .map { String path ->
+            new File(path.startsWith("~") ? System.getProperty("user.home") + path.substring(1) : path)
+        }
         .orElse(rootProject.layout.projectDirectory.dir("../frc-maven").asFile)
         .get()
 

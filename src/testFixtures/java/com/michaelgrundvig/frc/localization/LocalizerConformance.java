@@ -583,18 +583,17 @@ public abstract class LocalizerConformance {
     Pose2d truth = run.robot.truth();
     Pose2d farOff = truth.plus(new Transform2d(3, 3, Rotation2d.ZERO));
 
-    assertThatCode(
-            () ->
-                run.localizer.measurements(
-                    List.of(
-                        // Newest first, which is not the order they were taken in.
-                        measurement(now, truth, 0.05, 0.05),
-                        leaning(now - LOOP_NANOS, truth, 0.05, OFF_CENTER),
-                        measurement(now - 2 * LOOP_NANOS, truth, 0.05, 0.05),
-                        // Ten minutes old: older than any localizer keeps.
-                        measurement(1, farOff, 0.05, 0.05),
-                        // Stamped an hour from now.
-                        measurement(now + 3_600_000_000_000L, truth, 0.05, 0.05))))
+    assertThatCode(() ->
+            run.localizer.measurements(
+                List.of(
+                    // Newest first, which is not the order they were taken in.
+                    measurement(now, truth, 0.05, 0.05),
+                    leaning(now - LOOP_NANOS, truth, 0.05, OFF_CENTER),
+                    measurement(now - 2 * LOOP_NANOS, truth, 0.05, 0.05),
+                    // Ten minutes old: older than any localizer keeps.
+                    measurement(1, farOff, 0.05, 0.05),
+                    // Stamped an hour from now.
+                    measurement(now + 3_600_000_000_000L, truth, 0.05, 0.05))))
         .doesNotThrowAnyException();
 
     assertNumbers(run.localizer.pose());

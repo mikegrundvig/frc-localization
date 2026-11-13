@@ -727,18 +727,14 @@ class SlipCheckTest {
   void settingsMustMakeSense() {
     assertThatThrownBy(() -> SlipCheckSettingsBuilder.builder(SETTINGS).windowSeconds(0).build())
         .hasMessage("Settings.windowSeconds: 0 must be positive");
-    assertThatThrownBy(
-            () ->
-                SlipCheckSettingsBuilder.builder(SETTINGS)
-                    .speedToleranceMetersPerSecond(-1)
-                    .build())
+    assertThatThrownBy(() ->
+            SlipCheckSettingsBuilder.builder(SETTINGS).speedToleranceMetersPerSecond(-1).build())
         .hasMessage("Settings.speedToleranceMetersPerSecond: -1 must be zero or more");
     assertThatThrownBy(() -> new SlipCheck(SETTINGS, 0, GRIP)).hasMessageContaining("reach");
     assertThatThrownBy(() -> new SlipCheck(SETTINGS, REACH, 0)).hasMessageContaining("grip");
-    assertThatThrownBy(
-            () ->
-                new SlipCheck.Sample(
-                    0, 0, 0, 0, 0, Translation3d.ZERO, true, new ChassisVelocities(), 0, 0, 0))
+    assertThatThrownBy(() ->
+            new SlipCheck.Sample(
+                0, 0, 0, 0, 0, Translation3d.ZERO, true, new ChassisVelocities(), 0, 0, 0))
         .hasMessageContaining("takes time");
   }
 }
