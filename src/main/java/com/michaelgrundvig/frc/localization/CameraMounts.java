@@ -1,6 +1,6 @@
 package com.michaelgrundvig.frc.localization;
 
-import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -49,7 +49,7 @@ final class CameraMounts {
 
   /**
    * Every camera starts as a mount measured from CAD and checked does ({@link
-   * CameraConfig.MountTolerance#MEASURED}), until {@link #mount} says otherwise.
+   * MountTolerance#MEASURED}), until {@link #mount} says otherwise.
    */
   CameraMounts(
       EstimatorConfig config,
@@ -65,18 +65,18 @@ final class CameraMounts {
     this.history = history;
     this.corrections = corrections;
     knocks = new MountKnocks(config.cameraWatchMeasurements());
-    CameraConfig.MountTolerance measured = CameraConfig.MountTolerance.MEASURED;
+    MountTolerance measured = MountTolerance.MEASURED;
     Arrays.fill(turnVariance, square(measured.turnStdDevRadians()));
     Arrays.fill(shiftVariance, shiftVariance(config, measured));
   }
 
   /** How unsure a camera's shift is along each axis: its mount's offset, and its solves' beyond. */
-  static double shiftVariance(EstimatorConfig config, CameraConfig.MountTolerance mount) {
+  static double shiftVariance(EstimatorConfig config, MountTolerance mount) {
     return square(mount.offsetStdDevMeters()) + square(config.cameraShiftStdDevMeters());
   }
 
   /** Gives a camera its place, and starts its mount as unsure as its tolerance says. */
-  void mount(String name, CameraConfig.MountTolerance tolerance) {
+  void mount(String name, MountTolerance tolerance) {
     int camera = places.cameraPlace(name);
     if (!ConsideredErrors.hasPlace(camera)) {
       return;

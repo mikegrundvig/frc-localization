@@ -1,6 +1,6 @@
 package com.michaelgrundvig.frc.localization;
 
-import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 
 /**
  * The estimator's parts as its configuration sizes and weighs them: each value turned from the
@@ -28,7 +28,7 @@ final class EstimatorParts {
 
   /** The filter, as the configuration weighs the gyro, the cameras and the tags. */
   static PoseFilter filter(EstimatorConfig config, HeadingCorrection heading, int tagCount) {
-    CameraConfig.MountTolerance measured = CameraConfig.MountTolerance.MEASURED;
+    MountTolerance measured = MountTolerance.MEASURED;
     return new PoseFilter(
         new ConsideredSizes(
             Math.toRadians(config.headingStdDevDegreesPerTurn()) / RADIANS_PER_TURN,
@@ -48,7 +48,7 @@ final class EstimatorParts {
 
   /** The watch on the cameras, every camera starting as a measured mount would. */
   static CameraWatch watch(EstimatorConfig config) {
-    CameraConfig.MountTolerance measured = CameraConfig.MountTolerance.MEASURED;
+    MountTolerance measured = MountTolerance.MEASURED;
     return new CameraWatch(
         config.cameraWatchMeasurements(),
         measured.turnStdDevRadians(),

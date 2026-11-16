@@ -46,12 +46,12 @@ import com.michaelgrundvig.frc.world.config.ConfigRecord;
  *     MountCheck}). Above what a calibrated camera shows while the robot drives, mostly the
  *     estimate's own error.
  * @param latencyMarginSeconds an image is thrown out when it reaches the robot more than this after
- *     its camera's usual latency ({@code CameraConfig.ImageSensor.latency}), or before it was
- *     taken: the camera's clock and the robot's are out of step (PhotonVision's time sync), or the
- *     coprocessor is falling behind. It's judged against the loop before the one that read the
- *     image, so the robot's own wait, or a loop that ran long, doesn't count. What it can't catch:
- *     a clock off by less than the margin, whose images are applied that much too early or late (at
- *     3 m/s, 30 cm for 100 ms).
+ *     its camera's usual latency ({@code ImageSensor.latency}), or before it was taken: the
+ *     camera's clock and the robot's are out of step (PhotonVision's time sync), or the coprocessor
+ *     is falling behind. It's judged against the loop before the one that read the image, so the
+ *     robot's own wait, or a loop that ran long, doesn't count. What it can't catch: a clock off by
+ *     less than the margin, whose images are applied that much too early or late (at 3 m/s, 30 cm
+ *     for 100 ms).
  */
 @ConfigRecord
 public record VisionConfig(

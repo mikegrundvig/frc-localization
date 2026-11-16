@@ -12,7 +12,13 @@ import static org.wpilib.units.Units.Milliseconds;
 import com.michaelgrundvig.frc.world.field.FieldModel;
 import com.michaelgrundvig.frc.world.field.Symmetry;
 import com.michaelgrundvig.frc.world.game.Rebuilt;
+import com.michaelgrundvig.frc.world.robot.Camera;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.CameraStation;
+import com.michaelgrundvig.frc.world.robot.CameraType;
+import com.michaelgrundvig.frc.world.robot.ImageSensor;
+import com.michaelgrundvig.frc.world.robot.Lens;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -48,17 +54,21 @@ class VisionPipelineTest {
 
   /** A forward camera at the front of the robot, tilted up 15 degrees. */
   private static CameraConfig camera(double up, double noiseScale) {
-    return CameraConfig.of(
-            "front",
-            CameraConfig.ImageSensor.of(1280, 800, Hertz.of(30))
-                .fieldOfView(Degrees.of(80), CameraConfig.Across.DIAGONAL)
-                .latency(Milliseconds.of(30))
-                .sightRange(Meters.of(7)))
+    return CameraStation.named("front")
         .at(Inches.of(12), Inches.of(0), Inches.of(up / 0.0254))
         .facing(Degrees.of(15), Degrees.of(0))
         .roll(Degrees.of(0))
         .noiseScale(noiseScale)
-        .measured();
+        .mountTolerance(MountTolerance.MEASURED)
+        .holds(
+            Camera.photonVision(
+                1,
+                CameraType.of(
+                    "test camera",
+                    ImageSensor.of(1280, 800, Hertz.of(30))
+                        .fieldOfView(Degrees.of(80), ImageSensor.Across.DIAGONAL)
+                        .latency(Milliseconds.of(30))
+                        .sightRange(Meters.of(7)))));
   }
 
   /** The camera's exact view of some tags, with the robot where it is. */
@@ -560,8 +570,9 @@ class VisionPipelineTest {
 
   @Test
   void anImageWithoutATagToSolveSaysWhichOfItsCausesItWas() {
-    CameraConfig noLens = camera.withSoftware(CameraConfig.Software.VISOR);
-    CameraConfig calibrated = camera.withSoftware(CameraConfig.Software.visor().lens(lens()));
+    Camera onVisor = Camera.visor(1, camera.type());
+    CameraConfig noLens = camera.station().holds(onVisor);
+    CameraConfig calibrated = camera.station().holds(onVisor.lens(lens()));
     TagDetections unsolved = new TagDetections(1, "front", List.of(), null, List.of(25, 26));
     List<NoTagToSolve> rows =
         List.of(
@@ -616,8 +627,8 @@ class VisionPipelineTest {
   }
 
   /** A lens at the test camera's frame size, as calibrate.py prints one. */
-  private static CameraConfig.Software.Lens lens() {
-    return CameraConfig.Software.Lens.builder()
+  private static Lens lens() {
+    return Lens.builder()
         .width(1280)
         .height(800)
         .fx(905.2)

@@ -5,7 +5,7 @@ import static org.wpilib.units.Units.Degrees;
 import static org.wpilib.units.Units.Meters;
 
 import com.michaelgrundvig.frc.localization.EstimatorConfig.GyroErrors;
-import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -122,8 +122,7 @@ class EstimatorSessionGoldenTest {
   private static PoseEstimator estimator(HeadingCorrection heading, GyroErrors gyro) {
     EstimatorConfig config =
         EstimatorConfigBuilder.builder(EstimatorConfig.defaults()).gyroErrors(gyro).build();
-    CameraConfig.MountTolerance tolerance =
-        CameraConfig.MountTolerance.of(Meters.of(0.002), Degrees.of(0.1));
+    MountTolerance tolerance = MountTolerance.of(Meters.of(0.002), Degrees.of(0.1));
     return new PoseEstimator(
         config,
         heading,

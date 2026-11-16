@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -100,8 +101,8 @@ public final class PoseEstimator {
 
   /**
    * An estimator that takes each camera, as it first gives a measurement, to sit as a mount
-   * measured from CAD and checked does ({@link CameraConfig.MountTolerance#MEASURED}). The
-   * parameters are as for the constructor that names the cameras.
+   * measured from CAD and checked does ({@link MountTolerance#MEASURED}). The parameters are as for
+   * the constructor that names the cameras.
    */
   public PoseEstimator(
       EstimatorConfig config,
@@ -119,7 +120,7 @@ public final class PoseEstimator {
    *     new in each image ({@link #tagsWithoutPlaces})
    * @param cameras the robot's cameras, each known by its name: its turn on its mount starts as
    *     unsure as its mount's tolerance says. A camera not among them that gives a measurement is
-   *     taken to sit as a measured mount does ({@link CameraConfig.MountTolerance#MEASURED})
+   *     taken to sit as a measured mount does ({@link MountTolerance#MEASURED})
    * @param initial where the robot is at the start, and how sure that is; for a placeholder (the
    *     robot not placed yet) give a large uncertainty, and the first camera measurement wins
    */

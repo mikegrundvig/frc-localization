@@ -1,6 +1,7 @@
 package com.michaelgrundvig.frc.localization;
 
 import com.michaelgrundvig.frc.world.field.FieldModel;
+import com.michaelgrundvig.frc.world.robot.Camera;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
 import java.util.ArrayList;
 import java.util.List;
@@ -272,7 +273,7 @@ public final class VisionPipeline {
    */
   private static Verdict whyUnsolved(CameraConfig camera) {
     boolean withoutALens =
-        camera.software() instanceof CameraConfig.Software.Visor visor && visor.lens().isEmpty();
+        camera.software() instanceof Camera.Software.Visor visor && visor.lens().isEmpty();
     if (withoutALens) {
       return Verdict.NO_LENS;
     }

@@ -1,6 +1,6 @@
 package com.michaelgrundvig.frc.localization;
 
-import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.SplittableRandom;
@@ -103,7 +103,7 @@ final class MountWorld {
    */
   MountWorld(
       EstimatorConfig config,
-      CameraConfig.MountTolerance tolerance,
+      MountTolerance tolerance,
       Pose2d start,
       double placedHeadingStdDev,
       long seed) {

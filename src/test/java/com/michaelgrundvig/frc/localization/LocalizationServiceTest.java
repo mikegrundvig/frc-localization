@@ -21,14 +21,19 @@ import com.michaelgrundvig.frc.world.game.Rebuilt;
 import com.michaelgrundvig.frc.world.physical.Inertia;
 import com.michaelgrundvig.frc.world.physical.Vector3;
 import com.michaelgrundvig.frc.world.robot.Body;
+import com.michaelgrundvig.frc.world.robot.Camera;
 import com.michaelgrundvig.frc.world.robot.CameraConfig;
-import com.michaelgrundvig.frc.world.robot.CameraConfigBuilder;
+import com.michaelgrundvig.frc.world.robot.CameraStation;
+import com.michaelgrundvig.frc.world.robot.CameraStationBuilder;
+import com.michaelgrundvig.frc.world.robot.CameraType;
 import com.michaelgrundvig.frc.world.robot.Drivetrain;
 import com.michaelgrundvig.frc.world.robot.DrivetrainModuleBuilder;
 import com.michaelgrundvig.frc.world.robot.Gearing;
+import com.michaelgrundvig.frc.world.robot.ImageSensor;
 import com.michaelgrundvig.frc.world.robot.ImuMount;
 import com.michaelgrundvig.frc.world.robot.Joint;
 import com.michaelgrundvig.frc.world.robot.Motor;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import com.michaelgrundvig.frc.world.robot.Part;
 import com.michaelgrundvig.frc.world.robot.RevoluteJoint;
 import com.michaelgrundvig.frc.world.robot.RobotDefinition;
@@ -77,17 +82,21 @@ class LocalizationServiceTest {
 
   /** A forward camera at the front of the robot, tilted up 15 degrees. */
   private static final CameraConfig FRONT =
-      CameraConfig.of(
-              "front",
-              CameraConfig.ImageSensor.of(1280, 800, Hertz.of(30))
-                  .fieldOfView(Degrees.of(80), CameraConfig.Across.DIAGONAL)
-                  .latency(Milliseconds.of(30))
-                  .sightRange(Meters.of(7)))
+      CameraStation.named("front")
           .at(Inches.of(12), Inches.of(0), Inches.of(12))
           .facing(Degrees.of(15), Degrees.of(0))
           .roll(Degrees.of(0))
           .noiseScale(1.0)
-          .measured();
+          .mountTolerance(MountTolerance.MEASURED)
+          .holds(
+              Camera.photonVision(
+                  1,
+                  CameraType.of(
+                      "test camera",
+                      ImageSensor.of(1280, 800, Hertz.of(30))
+                          .fieldOfView(Degrees.of(80), ImageSensor.Across.DIAGONAL)
+                          .latency(Milliseconds.of(30))
+                          .sightRange(Meters.of(7)))));
 
   /** A 28 x 24 in frame, 60 kg. */
   private static final Body BODY =
@@ -163,7 +172,12 @@ class LocalizationServiceTest {
    */
   @Test
   void aCameraOnAJointIsSolvedFromWhereItsJointCarriedIt() {
-    CameraConfig riding = CameraConfigBuilder.builder(FRONT).name("turret").joint(TURRET).build();
+    CameraConfig riding =
+        CameraStationBuilder.builder(FRONT.station())
+            .name("turret")
+            .joint(TURRET)
+            .build()
+            .holds(FRONT.camera());
     RobotDefinition turreted =
         RobotDefinitionBuilder.builder(DEFINITION)
             .joints(List.of(TURRET))

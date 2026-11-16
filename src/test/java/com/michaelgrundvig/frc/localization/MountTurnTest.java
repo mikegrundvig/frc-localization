@@ -3,7 +3,7 @@ package com.michaelgrundvig.frc.localization;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 
-import com.michaelgrundvig.frc.world.robot.CameraConfig;
+import com.michaelgrundvig.frc.world.robot.MountTolerance;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -54,7 +54,7 @@ class MountTurnTest {
   }
 
   /** Each camera's mount as far off as a mount measured from CAD and checked may be. */
-  private static final CameraConfig.MountTolerance MEASURED = CameraConfig.MountTolerance.MEASURED;
+  private static final MountTolerance MEASURED = MountTolerance.MEASURED;
 
   private static final double PRIOR_DEGREES = Math.toDegrees(MEASURED.turnStdDevRadians());
 
